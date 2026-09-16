@@ -25,6 +25,19 @@ assert_eq "$validation" "OK: 3 command records" "fixed library validates"
 tree_validation=$($CMDABC validate --library "$TREE_LIBRARY")
 assert_eq "$tree_validation" "OK: 4 command records" "tree picker fixture validates"
 
+: > "$TMP_DIR/empty.txt"
+empty_validation=$($CMDABC validate --library "$TMP_DIR/empty.txt")
+assert_eq "$empty_validation" "OK: 0 command records" "empty user library is valid"
+
+printf '# comments only\n\n' > "$TMP_DIR/comments-only.txt"
+comments_validation=$($CMDABC validate --library "$TMP_DIR/comments-only.txt")
+assert_eq "$comments_validation" "OK: 0 command records" "comments-only user library is valid"
+
+mkdir -p "$TMP_DIR/home/.cmdabc-data"
+: > "$TMP_DIR/home/.cmdabc-data/command-library.txt"
+default_validation=$(HOME="$TMP_DIR/home" CMDABC_LIBRARY= $CMDABC validate)
+assert_eq "$default_validation" "OK: 0 command records" "default user library path validates"
+
 root_children=$($CMDABC children --library "$LIBRARY" --path test)
 expected_root=$(printf 'one\tleaf\techo ONE\ngroup\tparent\t')
 assert_eq "$root_children" "$expected_root" "root children use short labels"

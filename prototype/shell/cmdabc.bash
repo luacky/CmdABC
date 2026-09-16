@@ -1,5 +1,5 @@
-# CmdABC C00 Bash prototype integration.
-# Source only inside an isolated interactive Bash session.
+# CmdABC Bash integration.
+# Source only inside an interactive Bash session.
 
 if [ -z "${BASH_VERSION:-}" ]; then
   printf 'cmdabc: this integration requires Bash\n' >&2
@@ -14,7 +14,7 @@ fi
 _cmdabc_bash_source=${BASH_SOURCE[0]}
 _cmdabc_bash_dir=$(cd "${_cmdabc_bash_source%/*}" && pwd)
 : "${CMDABC_BIN:=${_cmdabc_bash_dir%/shell}/cmdabc}"
-: "${CMDABC_LIBRARY:=${_cmdabc_bash_dir%/shell}/command-library.txt}"
+: "${CMDABC_LIBRARY:=${HOME:-}/.cmdabc-data/command-library.txt}"
 unset _cmdabc_bash_source _cmdabc_bash_dir
 
 __cmdabc_dot_widget() {

@@ -20,10 +20,10 @@ proc must_expect {literal} {
 }
 
 if {$shell_kind eq "zsh"} {
-  spawn env PS1=CMDABC_TEST_PROMPT $shell_bin -f
+  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$prototype_dir/command-library.txt $shell_bin -f
   set integration "$prototype_dir/shell/cmdabc.zsh"
 } else {
-  spawn env PS1=CMDABC_TEST_PROMPT $shell_bin --noprofile --norc
+  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$prototype_dir/command-library.txt $shell_bin --noprofile --norc
   set integration "$prototype_dir/shell/cmdabc.bash"
 }
 

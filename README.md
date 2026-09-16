@@ -4,17 +4,34 @@ CmdABC 是面向 Shell 的层级命令成员补全工具。它把 `/namespace.` 
 
 > 安全不变量：CmdABC 永远不自动执行选中的命令。
 
-`C00｜需求冻结与核心交互可行性验证` 已关闭。核心 tree-picker UX 已在 macOS、ImmortalWrt、OCI Ubuntu 与 GCP Ubuntu 验收通过并冻结；本仓库目前只包含冻结规格和隔离原型，不包含同步、更新、安装/卸载、GUI 或生产部署。
+`C00｜需求冻结与核心交互可行性验证` 已关闭。核心 tree-picker UX 已在 macOS、ImmortalWrt、OCI Ubuntu 与 GCP Ubuntu 验收通过并冻结。C01 正在建立 0.1.0 本地安装、卸载与发布包基线；同步、更新、GUI 和生产部署仍不在当前范围内。
 
 ## 仓库结构
 
 - `docs/C00-SPEC.md`：C00 冻结规格、范围与验收标准。
 - `docs/C00-FEASIBILITY.md`：Bash Readline / Zsh ZLE 的最小接管方案和已知边界。
 - `docs/C00-RESULTS.md`：C00 最终自动化与三台 Linux 实机验收证据。
-- `prototype/cmdabc`：只读取词库的层级 picker 原型。
-- `prototype/shell/`：必须在隔离交互 Shell 中手动 `source` 的 Bash/Zsh 接入脚本。
+- `prototype/cmdabc`：只读取词库的层级 picker runtime；C01 installer 会复制它。
+- `prototype/shell/`：Bash/zsh 接入脚本；C00 手动试用仍只在隔离交互 Shell 中 source。
 - `prototype/command-library.txt`：C00 固定验收词库。
 - `prototype/tests/`：静态测试与交互验收脚本。
+- `install.sh`：将 0.1.0 程序安装到 `~/.cmdabc`，并注册当前 Bash/zsh。
+- `uninstall.sh`：只撤销精确 managed block 并删除程序目录。
+- `tests/install-uninstall.sh`：使用隔离临时 HOME 验证安装、重装、卸载和数据保护。
+
+## C01 本地安装边界
+
+程序安装在 `~/.cmdabc`，用户命令数据固定保存在 `~/.cmdabc-data/command-library.txt`。安装和重装只在词库不存在时创建空文件；已有词库不会被覆盖。普通卸载始终保留整个 `~/.cmdabc-data`。
+
+`install.sh` 默认根据 `$SHELL` 注册 Bash 或 zsh，也可以通过 `CMDABC_SHELL=bash` 或 `CMDABC_SHELL=zsh` 明确选择。安装只维护对应 rc 中以下精确区块，不修改其他内容：
+
+```sh
+# >>> CmdABC >>>
+source "$HOME/.cmdabc/shell/cmdabc.zsh"
+# <<< CmdABC <<<
+```
+
+安装完成后需新开 Shell 生效。macOS Bash 仍只处理 `~/.bashrc`，不会修改 `.bash_profile` 或 `.profile`。
 
 ## 安全试用
 

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 
-# C00 prototype only. It reads CommandLibrary and prints a selected command;
+# CmdABC runtime. It reads CommandLibrary and prints a selected command;
 # it never evaluates or executes library commands.
 
-CMDABC_VERSION="0.0.0-c00"
+CMDABC_SOURCE_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+CMDABC_VERSION_FILE=$CMDABC_SOURCE_DIR/VERSION
+if [ ! -r "$CMDABC_VERSION_FILE" ]; then
+  CMDABC_VERSION_FILE=$CMDABC_SOURCE_DIR/../VERSION
+fi
+CMDABC_VERSION=''
+if [ -r "$CMDABC_VERSION_FILE" ]; then
+  IFS= read -r CMDABC_VERSION < "$CMDABC_VERSION_FILE" || CMDABC_VERSION=''
+fi
+unset CMDABC_SOURCE_DIR CMDABC_VERSION_FILE
 
 cmdabc_usage() {
   cat <<'EOF'
@@ -21,7 +30,10 @@ cmdabc_error() {
 }
 
 cmdabc_parse_args() {
-  CMDABC_LIBRARY_ARG=""
+  CMDABC_LIBRARY_ARG=${CMDABC_LIBRARY:-}
+  if [ -z "$CMDABC_LIBRARY_ARG" ] && [ -n "${HOME:-}" ]; then
+    CMDABC_LIBRARY_ARG=$HOME/.cmdabc-data/command-library.txt
+  fi
   CMDABC_PATH_ARG=""
   CMDABC_NAMESPACE_ARG=""
 
@@ -119,7 +131,6 @@ cmdabc_load_library() {
     CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=$command
   done < "$library"
 
-  [ "${#CMDABC_PATHS[@]}" -gt 0 ] || { cmdabc_error "$library: no command records"; return 2; }
 }
 
 cmdabc_build_children() {
@@ -442,6 +453,7 @@ case "${1:-}" in
     cmdabc_pick "$@"
     ;;
   --version)
+    [ -n "$CMDABC_VERSION" ] || { cmdabc_error "VERSION not found"; exit 2; }
     printf '%s\n' "$CMDABC_VERSION"
     ;;
   -h|--help|'')

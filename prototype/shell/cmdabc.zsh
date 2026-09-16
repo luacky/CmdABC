@@ -1,5 +1,5 @@
-# CmdABC C00 Zsh prototype integration.
-# Source only inside an isolated interactive `zsh -f` session.
+# CmdABC zsh integration.
+# Source only inside an interactive zsh session.
 
 if [ -z "${ZSH_VERSION:-}" ]; then
   print -u2 'cmdabc: this integration requires Zsh'
@@ -14,7 +14,7 @@ fi
 typeset -g _CMDABC_ZSH_SOURCE=${(%):-%N}
 typeset -g _CMDABC_ZSH_DIR=${_CMDABC_ZSH_SOURCE:A:h}
 : ${CMDABC_BIN:=${_CMDABC_ZSH_DIR:h}/cmdabc}
-: ${CMDABC_LIBRARY:=${_CMDABC_ZSH_DIR:h}/command-library.txt}
+: ${CMDABC_LIBRARY:=${HOME:-}/.cmdabc-data/command-library.txt}
 unset _CMDABC_ZSH_SOURCE _CMDABC_ZSH_DIR
 
 cmdabc-dot-widget() {
