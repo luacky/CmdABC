@@ -4,6 +4,7 @@ set -u
 
 CMDABC_MARKER_START='# >>> CmdABC >>>'
 CMDABC_MARKER_END='# <<< CmdABC <<<'
+CMDABC_RC_CREATED_MARKER='# CmdABC-RC-CREATED-BY-INSTALLER'
 CMDABC_TMP_FILE=''
 CMDABC_UNINSTALL_CONFLICT=0
 CMDABC_RC_PATHS=()
@@ -63,7 +64,8 @@ cmdabc_add_rc_target() {
 cmdabc_remove_rc_block() {
   local rc_path=$1
   local shell_kind=$2
-  local source_line block prefixed_block content start_count end_count source_count prefix suffix updated temporary
+  local source_line block created_block selected_block prefixed_block content
+  local start_count end_count source_count created_count rc_created prefix suffix updated temporary
 
   [ -e "$rc_path" ] || [ -L "$rc_path" ] || return 0
   case "$shell_kind" in
@@ -71,7 +73,8 @@ cmdabc_remove_rc_block() {
     zsh) source_line='source "$HOME/.cmdabc/shell/cmdabc.zsh"' ;;
   esac
   printf -v block '%s\n%s\n%s\n' "$CMDABC_MARKER_START" "$source_line" "$CMDABC_MARKER_END"
-  prefixed_block=$'\n'$block
+  printf -v created_block '%s\n%s\n%s\n%s\n' \
+    "$CMDABC_MARKER_START" "$CMDABC_RC_CREATED_MARKER" "$source_line" "$CMDABC_MARKER_END"
 
   if [ -L "$rc_path" ]; then
     content=''
@@ -80,6 +83,7 @@ cmdabc_remove_rc_block() {
     fi
     if [[ "$content" == *"$CMDABC_MARKER_START"* ]] \
       || [[ "$content" == *"$CMDABC_MARKER_END"* ]] \
+      || [[ "$content" == *"$CMDABC_RC_CREATED_MARKER"* ]] \
       || [[ "$content" == *"$source_line"* ]]; then
       cmdabc_uninstall_error "cannot safely modify symlink rc file containing CmdABC registration: $rc_path"
       CMDABC_UNINSTALL_CONFLICT=1
@@ -99,21 +103,41 @@ cmdabc_remove_rc_block() {
   start_count=$(cmdabc_count_exact_line "$content" "$CMDABC_MARKER_START")
   end_count=$(cmdabc_count_exact_line "$content" "$CMDABC_MARKER_END")
   source_count=$(cmdabc_count_exact_line "$content" "$source_line")
+  created_count=$(cmdabc_count_exact_line "$content" "$CMDABC_RC_CREATED_MARKER")
 
   if [ "$start_count" -eq 0 ] && [ "$end_count" -eq 0 ]; then
-    if [ "$source_count" -ne 0 ]; then
-      cmdabc_uninstall_error "unmanaged CmdABC source line remains in $rc_path"
+    if [ "$source_count" -ne 0 ] || [ "$created_count" -ne 0 ]; then
+      cmdabc_uninstall_error "unmanaged CmdABC registration state remains in $rc_path"
       CMDABC_UNINSTALL_CONFLICT=1
     fi
     return 0
   fi
-  if [ "$start_count" -ne 1 ] || [ "$end_count" -ne 1 ] || [[ "$content" != *"$block"* ]]; then
+  rc_created=0
+  if [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] \
+    && [ "$source_count" -eq 1 ] && [ "$created_count" -eq 0 ] \
+    && [[ "$content" == *"$block"* ]]; then
+    selected_block=$block
+  elif [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] \
+    && [ "$source_count" -eq 1 ] && [ "$created_count" -eq 1 ] \
+    && [[ "$content" == *"$created_block"* ]]; then
+    selected_block=$created_block
+    rc_created=1
+  else
     cmdabc_uninstall_error "incomplete, duplicate, or modified CmdABC managed block in $rc_path"
     CMDABC_UNINSTALL_CONFLICT=1
     return 0
   fi
+  prefixed_block=$'\n'$selected_block
 
-  if [ "$content" = "$block" ]; then
+  if [ "$rc_created" -eq 1 ] && [ "$content" = "$selected_block" ]; then
+    rm -f "$rc_path" || {
+      cmdabc_uninstall_error "cannot remove installer-created rc file: $rc_path"
+      CMDABC_UNINSTALL_CONFLICT=1
+      return 0
+    }
+    printf 'Removed installer-created CmdABC rc file: %s\n' "$rc_path"
+    return 0
+  elif [ "$content" = "$selected_block" ]; then
     updated=''
   elif [[ "$content" == *"$prefixed_block"* ]]; then
     prefix=${content%%"$prefixed_block"*}
@@ -124,8 +148,8 @@ cmdabc_remove_rc_block() {
       updated=$prefix$suffix
     fi
   else
-    prefix=${content%%"$block"*}
-    suffix=${content#*"$block"}
+    prefix=${content%%"$selected_block"*}
+    suffix=${content#*"$selected_block"}
     updated=$prefix$suffix
   fi
   temporary=$rc_path.cmdabc-uninstall.$$

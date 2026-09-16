@@ -4,6 +4,7 @@ set -u
 
 CMDABC_MARKER_START='# >>> CmdABC >>>'
 CMDABC_MARKER_END='# <<< CmdABC <<<'
+CMDABC_RC_CREATED_MARKER='# CmdABC-RC-CREATED-BY-INSTALLER'
 CMDABC_TMP_FILE=''
 
 cmdabc_install_error() {
@@ -64,7 +65,8 @@ cmdabc_copy_program_file() {
 cmdabc_register_shell() {
   local rc_path=$1
   local source_line=$2
-  local rc_parent content start_count end_count source_count block temporary
+  local rc_parent content start_count end_count source_count created_count
+  local block created_block selected_block rc_existed temporary
 
   rc_parent=${rc_path%/*}
   [ -d "$rc_parent" ] || cmdabc_install_fail "rc parent directory does not exist: $rc_parent"
@@ -86,19 +88,32 @@ cmdabc_register_shell() {
   fi
 
   content=''
+  rc_existed=0
   if [ -e "$rc_path" ]; then
+    rc_existed=1
     cmdabc_read_file content "$rc_path" || cmdabc_install_fail "cannot read rc file: $rc_path"
   fi
   start_count=$(cmdabc_count_exact_line "$content" "$CMDABC_MARKER_START")
   end_count=$(cmdabc_count_exact_line "$content" "$CMDABC_MARKER_END")
   source_count=$(cmdabc_count_exact_line "$content" "$source_line")
+  created_count=$(cmdabc_count_exact_line "$content" "$CMDABC_RC_CREATED_MARKER")
   printf -v block '%s\n%s\n%s\n' "$CMDABC_MARKER_START" "$source_line" "$CMDABC_MARKER_END"
+  printf -v created_block '%s\n%s\n%s\n%s\n' \
+    "$CMDABC_MARKER_START" "$CMDABC_RC_CREATED_MARKER" "$source_line" "$CMDABC_MARKER_END"
 
-  if [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] && [[ "$content" == *"$block"* ]]; then
+  if [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] \
+    && [ "$source_count" -eq 1 ] && [ "$created_count" -eq 0 ] \
+    && [[ "$content" == *"$block"* ]]; then
     printf 'CmdABC shell registration already present: %s\n' "$rc_path"
     return 0
   fi
-  if [ "$start_count" -ne 0 ] || [ "$end_count" -ne 0 ]; then
+  if [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] \
+    && [ "$source_count" -eq 1 ] && [ "$created_count" -eq 1 ] \
+    && [[ "$content" == *"$created_block"* ]]; then
+    printf 'CmdABC shell registration already present: %s\n' "$rc_path"
+    return 0
+  fi
+  if [ "$start_count" -ne 0 ] || [ "$end_count" -ne 0 ] || [ "$created_count" -ne 0 ]; then
     cmdabc_install_fail "incomplete, duplicate, or modified CmdABC managed block in $rc_path"
   fi
   if [ "$source_count" -ne 0 ]; then
@@ -113,10 +128,15 @@ cmdabc_register_shell() {
   else
     (umask 077; : > "$temporary") || cmdabc_install_fail "cannot create rc file: $rc_path"
   fi
+  if [ "$rc_existed" -eq 0 ]; then
+    selected_block=$created_block
+  else
+    selected_block=$block
+  fi
   if [ -n "$content" ]; then
     printf '\n' >> "$temporary" || cmdabc_install_fail "cannot separate managed block: $rc_path"
   fi
-  printf '%s' "$block" >> "$temporary" || cmdabc_install_fail "cannot append managed block: $rc_path"
+  printf '%s' "$selected_block" >> "$temporary" || cmdabc_install_fail "cannot append managed block: $rc_path"
   mv -f "$temporary" "$rc_path" || cmdabc_install_fail "cannot replace rc file: $rc_path"
   CMDABC_TMP_FILE=''
   printf 'Registered CmdABC in %s\n' "$rc_path"

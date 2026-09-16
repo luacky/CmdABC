@@ -41,6 +41,141 @@ block_count() {
   awk '$0 == "# >>> CmdABC >>>" { count += 1 } END { print count + 0 }' "$1"
 }
 
+created_marker_count() {
+  awk '$0 == "# CmdABC-RC-CREATED-BY-INSTALLER" { count += 1 } END { print count + 0 }' "$1"
+}
+
+install_for_shell() {
+  local kind=$1
+  local home=$2
+  local rc_parent=$3
+
+  if [ "$kind" = bash ]; then
+    HOME="$home" SHELL=/bin/bash CMDABC_SHELL=bash "$INSTALLER" >/dev/null
+  else
+    HOME="$home" SHELL=$(command -v zsh) CMDABC_SHELL=zsh ZDOTDIR="$rc_parent" \
+      "$INSTALLER" >/dev/null
+  fi
+}
+
+uninstall_for_shell() {
+  local kind=$1
+  local home=$2
+  local rc_parent=$3
+
+  if [ "$kind" = bash ]; then
+    HOME="$home" SHELL=/bin/bash CMDABC_SHELL=bash "$home/.cmdabc/uninstall.sh" >/dev/null
+  else
+    HOME="$home" SHELL=$(command -v zsh) CMDABC_SHELL=zsh ZDOTDIR="$rc_parent" \
+      "$home/.cmdabc/uninstall.sh" >/dev/null
+  fi
+}
+
+run_rc_ownership_checks() {
+  local kind=$1
+  local case_home rc_parent rc_path before changed
+
+  case_home=$TMP_DIR/$kind-absent-rc-home
+  if [ "$kind" = bash ]; then
+    rc_parent=$case_home
+    rc_path=$case_home/.bashrc
+  else
+    rc_parent=$case_home/config/zsh
+    rc_path=$rc_parent/.zshrc
+  fi
+  mkdir -p "$rc_parent"
+  assert_not_exists "$rc_path"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_eq "$(block_count "$rc_path")" 1 "$kind absent rc block count"
+  assert_eq "$(created_marker_count "$rc_path")" 1 "$kind absent rc created marker count"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_eq "$(block_count "$rc_path")" 1 "$kind repeated install block count"
+  assert_eq "$(created_marker_count "$rc_path")" 1 "$kind repeated install created marker count"
+  uninstall_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_not_exists "$rc_path"
+  assert_file "$case_home/.cmdabc-data/command-library.txt"
+
+  case_home=$TMP_DIR/$kind-empty-rc-home
+  if [ "$kind" = bash ]; then
+    rc_parent=$case_home
+    rc_path=$case_home/.bashrc
+  else
+    rc_parent=$case_home/config/zsh
+    rc_path=$rc_parent/.zshrc
+  fi
+  mkdir -p "$rc_parent"
+  : > "$rc_path"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_eq "$(created_marker_count "$rc_path")" 0 "$kind empty pre-existing rc marker count"
+  uninstall_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_file "$rc_path"
+  [ ! -s "$rc_path" ] || fail "$kind empty pre-existing rc was not restored"
+
+  case_home=$TMP_DIR/$kind-content-rc-home
+  before=$TMP_DIR/$kind-content-rc-before
+  if [ "$kind" = bash ]; then
+    rc_parent=$case_home
+    rc_path=$case_home/.bashrc
+  else
+    rc_parent=$case_home/config/zsh
+    rc_path=$rc_parent/.zshrc
+  fi
+  mkdir -p "$rc_parent"
+  printf 'export CMDABC_%s_SENTINEL=yes' "$kind" > "$rc_path"
+  cp "$rc_path" "$before"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_eq "$(block_count "$rc_path")" 1 "$kind ordinary repeated install block count"
+  assert_eq "$(created_marker_count "$rc_path")" 0 "$kind ordinary repeated install marker count"
+  uninstall_for_shell "$kind" "$case_home" "$rc_parent"
+  cmp "$before" "$rc_path" || fail "$kind pre-existing rc was not restored byte-for-byte"
+
+  case_home=$TMP_DIR/$kind-later-content-home
+  if [ "$kind" = bash ]; then
+    rc_parent=$case_home
+    rc_path=$case_home/.bashrc
+  else
+    rc_parent=$case_home/config/zsh
+    rc_path=$rc_parent/.zshrc
+  fi
+  mkdir -p "$rc_parent"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  printf 'export CMDABC_%s_AFTER_INSTALL=yes\n' "$kind" >> "$rc_path"
+  uninstall_for_shell "$kind" "$case_home" "$rc_parent"
+  assert_file "$rc_path"
+  assert_eq "$(cat "$rc_path")" "export CMDABC_${kind}_AFTER_INSTALL=yes" \
+    "$kind user content added after install"
+  assert_eq "$(block_count "$rc_path")" 0 "$kind block removal with later content"
+  assert_eq "$(created_marker_count "$rc_path")" 0 "$kind marker removal with later content"
+
+  case_home=$TMP_DIR/$kind-modified-created-marker-home
+  changed=$TMP_DIR/$kind-modified-created-marker-before
+  if [ "$kind" = bash ]; then
+    rc_parent=$case_home
+    rc_path=$case_home/.bashrc
+  else
+    rc_parent=$case_home/config/zsh
+    rc_path=$rc_parent/.zshrc
+  fi
+  mkdir -p "$rc_parent"
+  install_for_shell "$kind" "$case_home" "$rc_parent"
+  sed 's/^# CmdABC-RC-CREATED-BY-INSTALLER$/# CmdABC-RC-CREATED-BY-INSTALLER-EDITED/' \
+    "$rc_path" > "$rc_path.changed"
+  mv "$rc_path.changed" "$rc_path"
+  cp "$rc_path" "$changed"
+  if uninstall_for_shell "$kind" "$case_home" "$rc_parent" 2>/dev/null; then
+    fail "$kind uninstaller accepted a modified created marker"
+  fi
+  cmp "$changed" "$rc_path" || fail "$kind failed uninstall changed user rc content"
+  assert_dir "$case_home/.cmdabc"
+  assert_file "$case_home/.cmdabc-data/command-library.txt"
+}
+
+run_rc_ownership_checks bash
+if command -v zsh >/dev/null 2>&1; then
+  run_rc_ownership_checks zsh
+fi
+
 # Fresh install: create the program, empty data file, and exactly one block.
 FRESH_HOME=$TMP_DIR/fresh-home
 mkdir -p "$FRESH_HOME"
@@ -158,6 +293,7 @@ assert_eq "$(HOME="$PACKAGE_HOME" "$PACKAGE_HOME/.cmdabc/cmdabc" --version)" \
   0.1.0 'release-layout installed version'
 uninstall_bash "$PACKAGE_HOME"
 assert_dir "$PACKAGE_HOME/.cmdabc-data"
+assert_not_exists "$PACKAGE_HOME/.bashrc"
 
 # zsh registration honors an explicit custom ZDOTDIR under HOME.
 if command -v zsh >/dev/null 2>&1; then

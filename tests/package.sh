@@ -54,6 +54,10 @@ block_count() {
   awk '$0 == "# >>> CmdABC >>>" { count += 1 } END { print count + 0 }' "$1"
 }
 
+created_marker_count() {
+  awk '$0 == "# CmdABC-RC-CREATED-BY-INSTALLER" { count += 1 } END { print count + 0 }' "$1"
+}
+
 find_bash52() {
   local candidate version
 
@@ -147,6 +151,54 @@ fi
 assert_eq "$(sed -n '1p' "$PACKAGE_ROOT/VERSION")" 0.1.0 'package VERSION'
 assert_eq "$(HOME="$TMP_DIR/version-home" "$PACKAGE_ROOT/cmdabc" --version)" \
   0.1.0 'package runtime version'
+
+# The extracted package must restore an absent rc to absent for both supported
+# shells, including after a repeated install, without changing user data.
+for kind in bash zsh; do
+  ABSENT_HOME=$TMP_DIR/package-absent-$kind-home
+  if [ "$kind" = bash ]; then
+    RC_PARENT=$ABSENT_HOME
+    RC_PATH=$ABSENT_HOME/.bashrc
+    SHELL_BIN=/bin/bash
+  else
+    RC_PARENT=$ABSENT_HOME/config/zsh
+    RC_PATH=$RC_PARENT/.zshrc
+    SHELL_BIN=$(command -v zsh)
+  fi
+  mkdir -p "$RC_PARENT"
+  if [ "$kind" = bash ]; then
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" \
+      "$PACKAGE_ROOT/install.sh" >/dev/null
+  else
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" ZDOTDIR="$RC_PARENT" \
+      "$PACKAGE_ROOT/install.sh" >/dev/null
+  fi
+  printf 'package.%s echo PRESERVE\n' "$kind" \
+    > "$ABSENT_HOME/.cmdabc-data/command-library.txt"
+  cp "$ABSENT_HOME/.cmdabc-data/command-library.txt" "$TMP_DIR/package-$kind-library-before"
+  if [ "$kind" = bash ]; then
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" \
+      "$PACKAGE_ROOT/install.sh" >/dev/null
+  else
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" ZDOTDIR="$RC_PARENT" \
+      "$PACKAGE_ROOT/install.sh" >/dev/null
+  fi
+  assert_eq "$(block_count "$RC_PATH")" 1 "$kind absent rc package block count"
+  assert_eq "$(created_marker_count "$RC_PATH")" 1 \
+    "$kind absent rc package created marker count"
+  if [ "$kind" = bash ]; then
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" \
+      "$ABSENT_HOME/.cmdabc/uninstall.sh" >/dev/null
+  else
+    HOME="$ABSENT_HOME" SHELL="$SHELL_BIN" CMDABC_SHELL="$kind" ZDOTDIR="$RC_PARENT" \
+      "$ABSENT_HOME/.cmdabc/uninstall.sh" >/dev/null
+  fi
+  assert_not_exists "$RC_PATH"
+  assert_dir "$ABSENT_HOME/.cmdabc-data"
+  cmp "$TMP_DIR/package-$kind-library-before" \
+    "$ABSENT_HOME/.cmdabc-data/command-library.txt" \
+    || fail "$kind absent rc package cycle changed user data"
+done
 
 RELEASE_HOME=$TMP_DIR/release-home
 mkdir -p "$RELEASE_HOME"
