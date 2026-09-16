@@ -33,6 +33,20 @@ source "$HOME/.cmdabc/shell/cmdabc.zsh"
 
 安装完成后需新开 Shell 生效。macOS Bash 仍只处理 `~/.bashrc`，不会修改 `.bash_profile` 或 `.profile`。
 
+## 本地命令管理
+
+`abc` 是 CmdABC 永久保留的系统 namespace，不写入用户词库，也不能被用户记录覆盖。输入 `/abc.` 可在 picker 中选择以下管理命令；选择只回填，随后按 Enter 才由 CmdABC 处理：
+
+```text
+/abc.list
+/abc.add.<target> <command>
+/abc.update.<target> <command>
+/abc.del.<target>
+/abc.help
+```
+
+例如 `/abc.add.git.status git status` 会把 `git.status git status` 写入用户词库，但不会执行 `git status`。新增、更新和删除均先写同目录临时文件，完整验证后再原子替换原词库。
+
 ## 安全试用
 
 不要把 C00 原型写入 `~/.bashrc` 或 `~/.zshrc`。Bash 隔离试用必须分两步：先执行并等待新 prompt：

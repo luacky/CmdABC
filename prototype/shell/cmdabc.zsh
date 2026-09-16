@@ -40,6 +40,22 @@ cmdabc-dot-widget() {
   return 0
 }
 
+cmdabc-accept-line-widget() {
+  if [[ "$BUFFER" != /abc.* ]]; then
+    zle .accept-line
+    return 0
+  fi
+
+  print
+  "$CMDABC_BIN" manage --library "$CMDABC_LIBRARY" --input "$BUFFER"
+  BUFFER=''
+  CURSOR=0
+  zle .accept-line
+  return 0
+}
+
 zle -N cmdabc-dot-widget
-# C00 intentionally changes only this isolated shell's current main keymap.
+zle -N cmdabc-accept-line-widget
+# `.` keeps the frozen C00 trigger. Enter only intercepts reserved /abc.* input.
 bindkey '.' cmdabc-dot-widget
+bindkey '^M' cmdabc-accept-line-widget

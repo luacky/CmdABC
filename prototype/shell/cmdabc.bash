@@ -43,5 +43,21 @@ __cmdabc_dot_widget() {
   return 0
 }
 
-# C00 intentionally changes only this isolated shell's current Readline keymap.
+__cmdabc_enter_widget() {
+  case "$READLINE_LINE" in
+    /abc.*) ;;
+    *) return 0 ;;
+  esac
+
+  printf '\n'
+  "$CMDABC_BIN" manage --library "$CMDABC_LIBRARY" --input "$READLINE_LINE"
+  READLINE_LINE=''
+  READLINE_POINT=0
+  return 0
+}
+
+# `.` keeps the frozen C00 trigger. Enter runs the narrow /abc.* handler first,
+# then Readline's ordinary accept-line binding through Ctrl-J.
 bind -x '".":__cmdabc_dot_widget'
+bind -x '"\C-x\C-a":__cmdabc_enter_widget'
+bind '"\C-m":"\C-x\C-a\C-j"'

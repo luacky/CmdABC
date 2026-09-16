@@ -4,6 +4,9 @@ set timeout 5
 set shell_kind [lindex $argv 0]
 set shell_bin [lindex $argv 1]
 set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+set noexec_marker [lindex $argv 4]
+set picker_fidelity_payload [lindex $argv 5]
 
 proc must_expect {literal} {
   expect {
@@ -20,10 +23,10 @@ proc must_expect {literal} {
 }
 
 if {$shell_kind eq "zsh"} {
-  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$prototype_dir/command-library.txt $shell_bin -f
+  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$library $shell_bin -f
   set integration "$prototype_dir/shell/cmdabc.zsh"
 } else {
-  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$prototype_dir/command-library.txt $shell_bin --noprofile --norc
+  spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
   set integration "$prototype_dir/shell/cmdabc.bash"
 }
 
@@ -31,10 +34,72 @@ must_expect "CMDABC_TEST_PROMPT"
 send -- "source $integration\r"
 must_expect "CMDABC_TEST_PROMPT"
 
+# Ordinary Enter still executes ordinary shell input.
+send -- "echo ORDINARY_ENTER_OK\r"
+must_expect "ORDINARY_ENTER_OK"
+must_expect "CMDABC_TEST_PROMPT"
+
+# /abc. is always supplied by the runtime, not the user library.
+send -- "/abc."
+must_expect "CmdABC  /abc."
+must_expect "> add"
+must_expect "del"
+must_expect "help"
+must_expect "list"
+must_expect "update"
+send -- "\033"
+after 150
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\025"
+
+# Select list from the built-in picker, then press Enter again to invoke the
+# narrow management handler. The picker itself still only fills the line.
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\033\[B\033\[B\r"
+must_expect "\033\[?25h\033\[?1049l"
+after 150
+send -- "\r"
+must_expect "4 user commands"
+must_expect "CMDABC_TEST_PROMPT"
+
+# Select add, append its target and command, and verify the stored payload is
+# never handed to the ordinary shell executor.
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+after 150
+send -- "manage.enter touch $noexec_marker\r"
+must_expect "Added: manage.enter"
+must_expect "CMDABC_TEST_PROMPT"
+
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\033\[B\033\[B\r"
+must_expect "\033\[?25h\033\[?1049l"
+after 150
+send -- "\r"
+must_expect "5 user commands"
+must_expect "manage.enter touch $noexec_marker"
+must_expect "CMDABC_TEST_PROMPT"
+
 # Ordinary dots must remain ordinary input and must not launch the picker.
 send -- "echo ordinary.txt"
 must_expect "echo ordinary.txt"
 send -- "\025"
+
+# A picker leaf containing ordinary shell metacharacters is returned to the
+# editable buffer exactly as stored and is not executed.
+send -- "/fidelity."
+must_expect "CmdABC  /fidelity."
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_TEST_PROMPT$picker_fidelity_payload"
+send -- "\003"
+after 200
+must_expect "CMDABC_TEST_PROMPT"
 
 # A standalone Esc cancels the picker and preserves the original /test. buffer.
 # Waiting beyond the escape-suffix timeout makes this distinct from an arrow.

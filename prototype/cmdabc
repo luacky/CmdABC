@@ -16,12 +16,13 @@ unset CMDABC_SOURCE_DIR CMDABC_VERSION_FILE
 
 cmdabc_usage() {
   cat <<'EOF'
-CmdABC C00 prototype
+CmdABC 0.1
 
 Usage:
   cmdabc validate --library FILE
   cmdabc children --library FILE --path PATH
   cmdabc pick --library FILE --namespace NAME
+  cmdabc manage --library FILE --input LINE
 EOF
 }
 
@@ -36,6 +37,7 @@ cmdabc_parse_args() {
   fi
   CMDABC_PATH_ARG=""
   CMDABC_NAMESPACE_ARG=""
+  CMDABC_INPUT_ARG=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -52,6 +54,11 @@ cmdabc_parse_args() {
       --namespace)
         [ "$#" -ge 2 ] || { cmdabc_error "--namespace requires a value"; return 2; }
         CMDABC_NAMESPACE_ARG=$2
+        shift 2
+        ;;
+      --input)
+        [ "$#" -ge 2 ] || { cmdabc_error "--input requires a value"; return 2; }
+        CMDABC_INPUT_ARG=$2
         shift 2
         ;;
       *)
@@ -96,6 +103,12 @@ cmdabc_load_library() {
     [ -n "$path" ] || { cmdabc_error "$library:$line_number: empty path"; return 2; }
     [ -n "$command" ] || { cmdabc_error "$library:$line_number: empty command"; return 2; }
     case "$path" in
+      abc|abc.*)
+        cmdabc_error "$library:$line_number: reserved namespace: abc"
+        return 2
+        ;;
+    esac
+    case "$path" in
       .*|*.|*..*)
         cmdabc_error "$library:$line_number: path contains an empty segment: $path"
         return 2
@@ -131,6 +144,23 @@ cmdabc_load_library() {
     CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=$command
   done < "$library"
 
+}
+
+cmdabc_load_system_library() {
+  CMDABC_PATHS=(
+    abc.add
+    abc.del
+    abc.help
+    abc.list
+    abc.update
+  )
+  CMDABC_COMMANDS=(
+    /abc.add.
+    /abc.del.
+    /abc.help
+    /abc.list
+    /abc.update.
+  )
 }
 
 cmdabc_build_children() {
@@ -185,7 +215,10 @@ cmdabc_children() {
   cmdabc_parse_args "$@" || return $?
   [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "children requires --library"; return 2; }
   [ -n "$CMDABC_PATH_ARG" ] || { cmdabc_error "children requires --path"; return 2; }
-  cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  case "$CMDABC_PATH_ARG" in
+    abc|abc.*) cmdabc_load_system_library ;;
+    *) cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $? ;;
+  esac
   cmdabc_build_children "$CMDABC_PATH_ARG"
   [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "path not found: $CMDABC_PATH_ARG"; return 3; }
 
@@ -197,6 +230,256 @@ cmdabc_children() {
       "${CMDABC_CHILD_COMMANDS[$index]}"
     index=$((index + 1))
   done
+}
+
+CMDABC_WRITE_TEMP=''
+
+cmdabc_write_cleanup() {
+  if [ -n "$CMDABC_WRITE_TEMP" ] && [ -e "$CMDABC_WRITE_TEMP" ]; then
+    rm -f "$CMDABC_WRITE_TEMP"
+  fi
+}
+
+cmdabc_read_file_exact() {
+  local output_name=$1
+  local path=$2
+  local value
+
+  value=$(cat "$path"; printf '\001') || return 1
+  value=${value%$'\001'}
+  printf -v "$output_name" '%s' "$value"
+}
+
+cmdabc_validate_user_target() {
+  local target=$1
+
+  [ -n "$target" ] || { cmdabc_error "target is empty"; return 2; }
+  case "$target" in
+    \#*) cmdabc_error "target cannot start with #: $target"; return 2 ;;
+    .*|*.|*..*) cmdabc_error "target contains an empty segment: $target"; return 2 ;;
+    *[[:space:]]*) cmdabc_error "target contains whitespace: $target"; return 2 ;;
+    abc|abc.*) cmdabc_error "target uses reserved namespace: abc"; return 2 ;;
+  esac
+}
+
+cmdabc_find_path_index() {
+  local wanted=$1
+  local index=0
+
+  CMDABC_FOUND_INDEX=-1
+  while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
+    if [ "${CMDABC_PATHS[$index]}" = "$wanted" ]; then
+      CMDABC_FOUND_INDEX=$index
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+cmdabc_check_new_target() {
+  local target=$1
+  local prior
+
+  for prior in "${CMDABC_PATHS[@]}"; do
+    if [ "$prior" = "$target" ]; then
+      cmdabc_error "target already exists: $target"
+      return 3
+    fi
+    case "$prior" in
+      "$target".*)
+        cmdabc_error "target is already a parent: $target"
+        return 3
+        ;;
+    esac
+    case "$target" in
+      "$prior".*)
+        cmdabc_error "target is below an existing command: $prior"
+        return 3
+        ;;
+    esac
+  done
+}
+
+cmdabc_prepare_write_temp() {
+  local library=$1
+  local parent=${library%/*}
+
+  [ ! -L "$library" ] || { cmdabc_error "refusing to modify symlink library: $library"; return 2; }
+  [ -f "$library" ] || { cmdabc_error "library not found: $library"; return 2; }
+  [ -r "$library" ] || { cmdabc_error "library is not readable: $library"; return 2; }
+  [ -w "$library" ] || { cmdabc_error "library is not writable: $library"; return 2; }
+  [ -d "$parent" ] && [ -w "$parent" ] \
+    || { cmdabc_error "library directory is not writable: $parent"; return 2; }
+
+  CMDABC_WRITE_TEMP=$library.cmdabc.$$
+  if [ -e "$CMDABC_WRITE_TEMP" ] || [ -L "$CMDABC_WRITE_TEMP" ]; then
+    cmdabc_error "temporary path already exists: $CMDABC_WRITE_TEMP"
+    CMDABC_WRITE_TEMP=''
+    return 2
+  fi
+  cp -p "$library" "$CMDABC_WRITE_TEMP" \
+    || { cmdabc_error "cannot prepare library update"; CMDABC_WRITE_TEMP=''; return 2; }
+  trap 'cmdabc_write_cleanup; exit 130' INT TERM HUP
+  trap 'cmdabc_write_cleanup' EXIT
+}
+
+cmdabc_commit_write_temp() {
+  local library=$1
+
+  cmdabc_load_library "$CMDABC_WRITE_TEMP" || return $?
+  mv -f "$CMDABC_WRITE_TEMP" "$library" || { cmdabc_error "cannot replace library"; return 2; }
+  CMDABC_WRITE_TEMP=''
+  trap - EXIT INT TERM HUP
+}
+
+cmdabc_manage_add() {
+  local library=$1
+  local target=$2
+  local command=$3
+  local content
+
+  cmdabc_validate_user_target "$target" || return $?
+  [[ "$command" =~ [^[:space:]] ]] || { cmdabc_error "add command is empty"; return 2; }
+  cmdabc_load_library "$library" || return $?
+  cmdabc_check_new_target "$target" || return $?
+  cmdabc_prepare_write_temp "$library" || return $?
+  cmdabc_read_file_exact content "$library" || { cmdabc_error "cannot read library"; return 2; }
+  if [ -n "$content" ] && [[ "$content" != *$'\n' ]]; then
+    printf '\n' >> "$CMDABC_WRITE_TEMP" || { cmdabc_error "cannot append library record"; return 2; }
+  fi
+  printf '%s %s\n' "$target" "$command" >> "$CMDABC_WRITE_TEMP" \
+    || { cmdabc_error "cannot append library record"; return 2; }
+  cmdabc_commit_write_temp "$library" || return $?
+  printf 'Added: %s\n' "$target"
+}
+
+cmdabc_rewrite_target() {
+  local operation=$1
+  local library=$2
+  local target=$3
+  local command=${4:-}
+  local line status path output_line
+
+  cmdabc_validate_user_target "$target" || return $?
+  cmdabc_load_library "$library" || return $?
+  cmdabc_find_path_index "$target" \
+    || { cmdabc_error "target not found: $target"; return 3; }
+  if [ "$operation" = update ]; then
+    [[ "$command" =~ [^[:space:]] ]] || { cmdabc_error "update command is empty"; return 2; }
+  fi
+
+  cmdabc_prepare_write_temp "$library" || return $?
+  : > "$CMDABC_WRITE_TEMP" || { cmdabc_error "cannot write temporary library"; return 2; }
+  while :; do
+    line=''
+    IFS= read -r line
+    status=$?
+    if [ "$status" -ne 0 ] && [ -z "$line" ]; then
+      break
+    fi
+    output_line=$line
+    if [[ ! "$line" =~ ^[[:space:]]*$ ]] && [[ "$line" != \#* ]]; then
+      path=${line%%[[:space:]]*}
+      if [ "$path" = "$target" ]; then
+        if [ "$operation" = delete ]; then
+          if [ "$status" -ne 0 ]; then
+            break
+          fi
+          continue
+        fi
+        output_line="$target $command"
+      fi
+    fi
+    if [ "$status" -eq 0 ]; then
+      printf '%s\n' "$output_line" >> "$CMDABC_WRITE_TEMP" \
+        || { cmdabc_error "cannot write temporary library"; return 2; }
+    else
+      printf '%s' "$output_line" >> "$CMDABC_WRITE_TEMP" \
+        || { cmdabc_error "cannot write temporary library"; return 2; }
+      break
+    fi
+  done < "$library"
+  cmdabc_commit_write_temp "$library" || return $?
+  case "$operation" in
+    update) printf 'Updated: %s\n' "$target" ;;
+    delete) printf 'Deleted: %s\n' "$target" ;;
+  esac
+}
+
+cmdabc_manage_list() {
+  local library=$1
+  local index=0
+
+  cmdabc_load_library "$library" || return $?
+  printf '%s user commands\n' "${#CMDABC_PATHS[@]}"
+  while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
+    printf '%s %s\n' "${CMDABC_PATHS[$index]}" "${CMDABC_COMMANDS[$index]}"
+    index=$((index + 1))
+  done
+}
+
+cmdabc_manage_help() {
+  cat <<'EOF'
+/abc.list
+/abc.add.<target> <command>
+/abc.update.<target> <command>
+/abc.del.<target>
+/abc.help
+
+Example: /abc.add.git.status git status
+EOF
+}
+
+cmdabc_manage() {
+  local input remainder target command
+
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "manage requires --library"; return 2; }
+  [ -n "$CMDABC_INPUT_ARG" ] || { cmdabc_error "manage requires --input"; return 2; }
+  input=$CMDABC_INPUT_ARG
+
+  case "$input" in
+    /abc.list)
+      cmdabc_manage_list "$CMDABC_LIBRARY_ARG"
+      ;;
+    /abc.help)
+      cmdabc_manage_help
+      ;;
+    /abc.add.*)
+      remainder=${input#/abc.add.}
+      case "$remainder" in
+        *[[:space:]]*) ;;
+        *) cmdabc_error "usage: /abc.add.<target> <command>"; return 2 ;;
+      esac
+      target=${remainder%%[[:space:]]*}
+      command=${remainder#"$target"}
+      command=${command#?}
+      cmdabc_manage_add "$CMDABC_LIBRARY_ARG" "$target" "$command"
+      ;;
+    /abc.update.*)
+      remainder=${input#/abc.update.}
+      case "$remainder" in
+        *[[:space:]]*) ;;
+        *) cmdabc_error "usage: /abc.update.<target> <command>"; return 2 ;;
+      esac
+      target=${remainder%%[[:space:]]*}
+      command=${remainder#"$target"}
+      command=${command#?}
+      cmdabc_rewrite_target update "$CMDABC_LIBRARY_ARG" "$target" "$command"
+      ;;
+    /abc.del.*)
+      target=${input#/abc.del.}
+      case "$target" in
+        ''|*[[:space:]]*) cmdabc_error "usage: /abc.del.<target>"; return 2 ;;
+      esac
+      cmdabc_rewrite_target delete "$CMDABC_LIBRARY_ARG" "$target"
+      ;;
+    *)
+      cmdabc_error "unknown management command: $input"
+      return 2
+      ;;
+  esac
 }
 
 CMDABC_TTY_ACTIVE=0
@@ -331,7 +614,11 @@ cmdabc_pick() {
     *[!A-Za-z0-9_-]*) cmdabc_error "invalid namespace: $namespace"; return 2 ;;
   esac
 
-  cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  if [ "$namespace" = abc ]; then
+    cmdabc_load_system_library
+  else
+    cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  fi
   cmdabc_build_children "$namespace"
   [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "namespace not found: $namespace"; return 3; }
 
@@ -451,6 +738,10 @@ case "${1:-}" in
   pick)
     shift
     cmdabc_pick "$@"
+    ;;
+  manage)
+    shift
+    cmdabc_manage "$@"
     ;;
   --version)
     [ -n "$CMDABC_VERSION" ] || { cmdabc_error "VERSION not found"; exit 2; }
