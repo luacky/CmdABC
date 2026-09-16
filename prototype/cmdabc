@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+
+# C00 prototype only. It reads CommandLibrary and prints a selected command;
+# it never evaluates or executes library commands.
+
+CMDABC_VERSION="0.0.0-c00"
+
+cmdabc_usage() {
+  cat <<'EOF'
+CmdABC C00 prototype
+
+Usage:
+  cmdabc validate --library FILE
+  cmdabc children --library FILE --path PATH
+  cmdabc pick --library FILE --namespace NAME
+EOF
+}
+
+cmdabc_error() {
+  printf 'cmdabc: %s\n' "$*" >&2
+}
+
+cmdabc_parse_args() {
+  CMDABC_LIBRARY_ARG=""
+  CMDABC_PATH_ARG=""
+  CMDABC_NAMESPACE_ARG=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --library)
+        [ "$#" -ge 2 ] || { cmdabc_error "--library requires a file"; return 2; }
+        CMDABC_LIBRARY_ARG=$2
+        shift 2
+        ;;
+      --path)
+        [ "$#" -ge 2 ] || { cmdabc_error "--path requires a value"; return 2; }
+        CMDABC_PATH_ARG=$2
+        shift 2
+        ;;
+      --namespace)
+        [ "$#" -ge 2 ] || { cmdabc_error "--namespace requires a value"; return 2; }
+        CMDABC_NAMESPACE_ARG=$2
+        shift 2
+        ;;
+      *)
+        cmdabc_error "unknown argument: $1"
+        return 2
+        ;;
+    esac
+  done
+}
+
+cmdabc_load_library() {
+  local library=$1
+  local line line_number path command prior
+
+  CMDABC_PATHS=()
+  CMDABC_COMMANDS=()
+
+  [ -f "$library" ] || { cmdabc_error "library not found: $library"; return 2; }
+  [ -r "$library" ] || { cmdabc_error "library is not readable: $library"; return 2; }
+
+  line_number=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+
+    case "$line" in
+      *[[:space:]]*) ;;
+      *)
+        cmdabc_error "$library:$line_number: missing command delimiter"
+        return 2
+        ;;
+    esac
+
+    path=${line%%[[:space:]]*}
+    command=${line#"$path"}
+    command=${command#?}
+
+    [ -n "$path" ] || { cmdabc_error "$library:$line_number: empty path"; return 2; }
+    [ -n "$command" ] || { cmdabc_error "$library:$line_number: empty command"; return 2; }
+    case "$path" in
+      .*|*.|*..*)
+        cmdabc_error "$library:$line_number: path contains an empty segment: $path"
+        return 2
+        ;;
+    esac
+    case "$path" in
+      *[[:space:]]*)
+        cmdabc_error "$library:$line_number: path contains whitespace: $path"
+        return 2
+        ;;
+    esac
+
+    for prior in "${CMDABC_PATHS[@]}"; do
+      if [ "$prior" = "$path" ]; then
+        cmdabc_error "$library:$line_number: duplicate path: $path"
+        return 2
+      fi
+      case "$prior" in
+        "$path".*)
+          cmdabc_error "$library:$line_number: node is both leaf and parent: $path"
+          return 2
+          ;;
+      esac
+      case "$path" in
+        "$prior".*)
+          cmdabc_error "$library:$line_number: node is both leaf and parent: $prior"
+          return 2
+          ;;
+      esac
+    done
+
+    CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
+    CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=$command
+  done < "$library"
+
+  [ "${#CMDABC_PATHS[@]}" -gt 0 ] || { cmdabc_error "$library: no command records"; return 2; }
+}
+
+cmdabc_build_children() {
+  local parent=$1
+  local index path remainder name child_index seen
+
+  CMDABC_CHILD_NAMES=()
+  CMDABC_CHILD_TYPES=()
+  CMDABC_CHILD_COMMANDS=()
+
+  index=0
+  while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
+    path=${CMDABC_PATHS[$index]}
+    case "$path" in
+      "$parent".*)
+        remainder=${path#"$parent".}
+        name=${remainder%%.*}
+        seen=0
+        child_index=0
+        while [ "$child_index" -lt "${#CMDABC_CHILD_NAMES[@]}" ]; do
+          if [ "${CMDABC_CHILD_NAMES[$child_index]}" = "$name" ]; then
+            seen=1
+            break
+          fi
+          child_index=$((child_index + 1))
+        done
+        if [ "$seen" -eq 0 ]; then
+          CMDABC_CHILD_NAMES[${#CMDABC_CHILD_NAMES[@]}]=$name
+          if [ "$remainder" = "$name" ]; then
+            CMDABC_CHILD_TYPES[${#CMDABC_CHILD_TYPES[@]}]="leaf"
+            CMDABC_CHILD_COMMANDS[${#CMDABC_CHILD_COMMANDS[@]}]=${CMDABC_COMMANDS[$index]}
+          else
+            CMDABC_CHILD_TYPES[${#CMDABC_CHILD_TYPES[@]}]="parent"
+            CMDABC_CHILD_COMMANDS[${#CMDABC_CHILD_COMMANDS[@]}]=""
+          fi
+        fi
+        ;;
+    esac
+    index=$((index + 1))
+  done
+}
+
+cmdabc_validate() {
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "validate requires --library"; return 2; }
+  cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  printf 'OK: %s command records\n' "${#CMDABC_PATHS[@]}"
+}
+
+cmdabc_children() {
+  local index
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "children requires --library"; return 2; }
+  [ -n "$CMDABC_PATH_ARG" ] || { cmdabc_error "children requires --path"; return 2; }
+  cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  cmdabc_build_children "$CMDABC_PATH_ARG"
+  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "path not found: $CMDABC_PATH_ARG"; return 3; }
+
+  index=0
+  while [ "$index" -lt "${#CMDABC_CHILD_NAMES[@]}" ]; do
+    printf '%s\t%s\t%s\n' \
+      "${CMDABC_CHILD_NAMES[$index]}" \
+      "${CMDABC_CHILD_TYPES[$index]}" \
+      "${CMDABC_CHILD_COMMANDS[$index]}"
+    index=$((index + 1))
+  done
+}
+
+CMDABC_TTY_ACTIVE=0
+
+cmdabc_tty_cleanup() {
+  if [ "$CMDABC_TTY_ACTIVE" -eq 1 ]; then
+    printf '\033[?25h\033[?1049l' >&4
+    CMDABC_TTY_ACTIVE=0
+  fi
+}
+
+cmdabc_append_visible_children() {
+  local parent=$1
+  local depth=$2
+  local expanded_path=$3
+  local index child_path is_expanded
+  local -a child_names child_types child_commands
+
+  cmdabc_build_children "$parent"
+  child_names=("${CMDABC_CHILD_NAMES[@]}")
+  child_types=("${CMDABC_CHILD_TYPES[@]}")
+  child_commands=("${CMDABC_CHILD_COMMANDS[@]}")
+
+  index=0
+  while [ "$index" -lt "${#child_names[@]}" ]; do
+    child_path="$parent.${child_names[$index]}"
+    is_expanded=0
+    if [ "${child_types[$index]}" = "parent" ]; then
+      case "$expanded_path" in
+        "$child_path"|"$child_path".*) is_expanded=1 ;;
+      esac
+    fi
+
+    CMDABC_VISIBLE_NAMES[${#CMDABC_VISIBLE_NAMES[@]}]=${child_names[$index]}
+    CMDABC_VISIBLE_TYPES[${#CMDABC_VISIBLE_TYPES[@]}]=${child_types[$index]}
+    CMDABC_VISIBLE_COMMANDS[${#CMDABC_VISIBLE_COMMANDS[@]}]=${child_commands[$index]}
+    CMDABC_VISIBLE_PATHS[${#CMDABC_VISIBLE_PATHS[@]}]=$child_path
+    CMDABC_VISIBLE_DEPTHS[${#CMDABC_VISIBLE_DEPTHS[@]}]=$depth
+    CMDABC_VISIBLE_EXPANDED[${#CMDABC_VISIBLE_EXPANDED[@]}]=$is_expanded
+
+    if [ "$is_expanded" -eq 1 ]; then
+      cmdabc_append_visible_children "$child_path" "$((depth + 1))" "$expanded_path"
+    fi
+    index=$((index + 1))
+  done
+}
+
+cmdabc_build_visible() {
+  local namespace=$1
+  local expanded_path=$2
+
+  CMDABC_VISIBLE_NAMES=()
+  CMDABC_VISIBLE_TYPES=()
+  CMDABC_VISIBLE_COMMANDS=()
+  CMDABC_VISIBLE_PATHS=()
+  CMDABC_VISIBLE_DEPTHS=()
+  CMDABC_VISIBLE_EXPANDED=()
+  cmdabc_append_visible_children "$namespace" 0 "$expanded_path"
+}
+
+cmdabc_find_visible_index() {
+  local wanted_path=$1
+  local index=0
+
+  CMDABC_VISIBLE_INDEX=-1
+  while [ "$index" -lt "${#CMDABC_VISIBLE_PATHS[@]}" ]; do
+    if [ "${CMDABC_VISIBLE_PATHS[$index]}" = "$wanted_path" ]; then
+      CMDABC_VISIBLE_INDEX=$index
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+cmdabc_render() {
+  local namespace=$1
+  local selected=$2
+  local index marker suffix indent depth
+
+  printf '\033[H\033[2J' >&4
+  printf 'CmdABC  /%s.\n\n' "$namespace" >&4
+  index=0
+  while [ "$index" -lt "${#CMDABC_VISIBLE_NAMES[@]}" ]; do
+    indent=''
+    depth=${CMDABC_VISIBLE_DEPTHS[$index]}
+    while [ "$depth" -gt 0 ]; do
+      indent="$indent  "
+      depth=$((depth - 1))
+    done
+    marker='  '
+    [ "$index" -eq "$selected" ] && marker='> '
+    suffix=''
+    if [ "${CMDABC_VISIBLE_TYPES[$index]}" = "parent" ]; then
+      if [ "${CMDABC_VISIBLE_EXPANDED[$index]}" -eq 1 ]; then
+        suffix=' ▾'
+      else
+        suffix=' ▸'
+      fi
+    fi
+    printf '%s%s%s%s\n' "$indent" "$marker" "${CMDABC_VISIBLE_NAMES[$index]}" "$suffix" >&4
+    index=$((index + 1))
+  done
+  printf '\n↑/↓ select   Enter/Right open   Left back   Esc cancel' >&4
+}
+
+cmdabc_read_escape_byte() {
+  local __cmdabc_byte
+
+  # Bash 3.2 does not accept fractional `read -t` values. It is only used as
+  # the picker launcher on macOS, so it gets a conservative one-second timeout.
+  # Target Bash 5.2 uses the short timeout.
+  __cmdabc_byte=''
+  if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+    IFS= read -r -s -n 1 -t 0.08 __cmdabc_byte <&3
+  else
+    IFS= read -r -s -n 1 -t 1 __cmdabc_byte <&3
+  fi
+  CMDABC_ESCAPE_BYTE=$__cmdabc_byte
+  [ -n "$CMDABC_ESCAPE_BYTE" ]
+}
+
+cmdabc_pick() {
+  local namespace expanded_path selected_path selected key second third
+  local type path parent_path ancestor_path command status
+
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "pick requires --library"; return 2; }
+  [ -n "$CMDABC_NAMESPACE_ARG" ] || { cmdabc_error "pick requires --namespace"; return 2; }
+  namespace=$CMDABC_NAMESPACE_ARG
+  case "$namespace" in
+    *[!A-Za-z0-9_-]*) cmdabc_error "invalid namespace: $namespace"; return 2 ;;
+  esac
+
+  cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+  cmdabc_build_children "$namespace"
+  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "namespace not found: $namespace"; return 3; }
+
+  exec 3</dev/tty 4>/dev/tty || { cmdabc_error "pick requires a controlling terminal"; return 4; }
+  trap 'cmdabc_tty_cleanup; exit 130' INT TERM HUP
+  trap 'cmdabc_tty_cleanup' EXIT
+  CMDABC_TTY_ACTIVE=1
+  printf '\033[?1049h\033[?25l' >&4
+
+  expanded_path=''
+  selected_path=''
+  while :; do
+    cmdabc_build_visible "$namespace" "$expanded_path"
+    if [ "${#CMDABC_VISIBLE_NAMES[@]}" -eq 0 ]; then
+      cmdabc_tty_cleanup
+      trap - EXIT INT TERM HUP
+      cmdabc_error "namespace has no children: $namespace"
+      return 3
+    fi
+    if [ -n "$selected_path" ] && cmdabc_find_visible_index "$selected_path"; then
+      selected=$CMDABC_VISIBLE_INDEX
+    else
+      selected=0
+      selected_path=${CMDABC_VISIBLE_PATHS[0]}
+    fi
+    cmdabc_render "$namespace" "$selected"
+
+    key=''
+    IFS= read -r -s -n 1 key <&3
+    status=$?
+    [ "$status" -eq 0 ] || continue
+
+    case "$key" in
+      ''|$'\r'|$'\n')
+        type=${CMDABC_VISIBLE_TYPES[$selected]}
+        path=${CMDABC_VISIBLE_PATHS[$selected]}
+        if [ "$type" = "parent" ]; then
+          cmdabc_build_children "$path"
+          expanded_path=$path
+          selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
+        else
+          command=${CMDABC_VISIBLE_COMMANDS[$selected]}
+          cmdabc_tty_cleanup
+          trap - EXIT INT TERM HUP
+          printf '%s\n' "$command"
+          return 0
+        fi
+        ;;
+      $'\033')
+        second=''
+        if ! cmdabc_read_escape_byte; then
+          cmdabc_tty_cleanup
+          trap - EXIT INT TERM HUP
+          return 130
+        fi
+        second=$CMDABC_ESCAPE_BYTE
+        if [ "$second" != '[' ]; then
+          continue
+        fi
+        third=''
+        cmdabc_read_escape_byte || continue
+        third=$CMDABC_ESCAPE_BYTE
+        case "$third" in
+          A)
+            selected=$((selected - 1))
+            [ "$selected" -ge 0 ] || selected=$((${#CMDABC_VISIBLE_NAMES[@]} - 1))
+            selected_path=${CMDABC_VISIBLE_PATHS[$selected]}
+            ;;
+          B)
+            selected=$((selected + 1))
+            [ "$selected" -lt "${#CMDABC_VISIBLE_NAMES[@]}" ] || selected=0
+            selected_path=${CMDABC_VISIBLE_PATHS[$selected]}
+            ;;
+          C)
+            type=${CMDABC_VISIBLE_TYPES[$selected]}
+            path=${CMDABC_VISIBLE_PATHS[$selected]}
+            if [ "$type" = "parent" ]; then
+              cmdabc_build_children "$path"
+              expanded_path=$path
+              selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
+            else
+              command=${CMDABC_VISIBLE_COMMANDS[$selected]}
+              cmdabc_tty_cleanup
+              trap - EXIT INT TERM HUP
+              printf '%s\n' "$command"
+              return 0
+            fi
+            ;;
+          D)
+            if [ "${CMDABC_VISIBLE_DEPTHS[$selected]}" -gt 0 ]; then
+              path=${CMDABC_VISIBLE_PATHS[$selected]}
+              parent_path=${path%.*}
+              ancestor_path=${parent_path%.*}
+              if [ "$ancestor_path" = "$namespace" ]; then
+                expanded_path=''
+              else
+                expanded_path=$ancestor_path
+              fi
+              selected_path=$parent_path
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  validate)
+    shift
+    cmdabc_validate "$@"
+    ;;
+  children)
+    shift
+    cmdabc_children "$@"
+    ;;
+  pick)
+    shift
+    cmdabc_pick "$@"
+    ;;
+  --version)
+    printf '%s\n' "$CMDABC_VERSION"
+    ;;
+  -h|--help|'')
+    cmdabc_usage
+    ;;
+  *)
+    cmdabc_error "unknown command: $1"
+    cmdabc_usage >&2
+    exit 2
+    ;;
+esac

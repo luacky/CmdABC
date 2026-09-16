@@ -1,0 +1,118 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env PS1=CMDABC_TEST_PROMPT $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env PS1=CMDABC_TEST_PROMPT $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+
+must_expect "CMDABC_TEST_PROMPT"
+send -- "source $integration\r"
+must_expect "CMDABC_TEST_PROMPT"
+
+# Ordinary dots must remain ordinary input and must not launch the picker.
+send -- "echo ordinary.txt"
+must_expect "echo ordinary.txt"
+send -- "\025"
+
+# A standalone Esc cancels the picker and preserves the original /test. buffer.
+# Waiting beyond the escape-suffix timeout makes this distinct from an arrow.
+send -- "/test."
+must_expect "CmdABC  /test."
+must_expect "group ▸"
+send -- "\033"
+after 150
+must_expect "\033\[?25h\033\[?1049l"
+send -- "cancel"
+# Force a full line-editor repaint; alternate-screen return may emit only the
+# changed suffix even when the complete buffer was preserved.
+send -- "\014"
+must_expect "CMDABC_TEST_PROMPT/test.cancel"
+send -- "\025"
+
+# Complete arrow escape sequences must not be mistaken for standalone Esc.
+# Root-left is a no-op. Right expands a parent in place and enters its first child.
+send -- "/test."
+must_expect "CmdABC  /test."
+must_expect "group ▸"
+send -- "\033\[D"
+must_expect "CmdABC  /test."
+send -- "\033\[B"
+send -- "\033\[C"
+must_expect "group ▾"
+must_expect "> two"
+# Up/down move across every visible row, including the expanded parent.
+send -- "\033\[A"
+must_expect "> group ▾"
+send -- "\033\[B"
+must_expect "> two"
+# Left returns to the parent and collapses that branch in place.
+send -- "\033\[D"
+must_expect "CmdABC  /test."
+must_expect "> group ▸"
+
+# Enter also expands a parent; right on a leaf fills without executing.
+send -- "\r"
+must_expect "group ▾"
+must_expect "> two"
+send -- "\033\[C"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_TEST_PROMPTecho TWO"
+
+# The filled line is still editable: move left and insert X before the final O.
+send -- "\033\[D"
+send -- "X"
+send -- "\014"
+must_expect "CMDABC_TEST_PROMPTecho TWXO"
+send -- "\003"
+after 200
+must_expect "CMDABC_TEST_PROMPT"
+
+# Up wraps to group; Enter on both parent and leaf follows the same path.
+send -- "/test."
+must_expect "CmdABC  /test."
+must_expect "group ▸"
+send -- "\033\[A"
+send -- "\r"
+must_expect "group ▾"
+must_expect "> two"
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_TEST_PROMPTecho TWO"
+
+# Seeing the command on the still-active prompt proves it was filled, not run.
+# Cancel the line so the fixture's echo command is never executed by the shell.
+send -- "\003"
+after 200
+must_expect "CMDABC_TEST_PROMPT"
+send -- "exit\r"
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

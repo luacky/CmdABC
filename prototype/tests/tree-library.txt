@@ -1,0 +1,5 @@
+# CmdABC C00 tree-picker acceptance fixture
+tree.alpha.leaf echo ALPHA
+tree.beta.one echo ONE
+tree.beta.deep.final echo FINAL
+tree.gamma.leaf echo GAMMA

@@ -1,0 +1,101 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set bash_bin [lindex $argv 0]
+set prototype_dir [lindex $argv 1]
+set library [lindex $argv 2]
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+spawn env PS1=CMDABC_TREE_PROMPT CMDABC_LIBRARY=$library $bash_bin --noprofile --norc
+must_expect "CMDABC_TREE_PROMPT"
+send -- "source $prototype_dir/shell/cmdabc.bash\r"
+must_expect "CMDABC_TREE_PROMPT"
+send -- "/tree."
+
+# Expanding alpha leaves the sibling branches collapsed.
+must_expect "> alpha"
+must_expect "\r\n  beta"
+must_expect "\r\n  gamma"
+send -- "\033\[C"
+must_expect "\r\n  alpha"
+must_expect "\r\n  > leaf\r\n"
+must_expect "beta"
+must_expect "gamma"
+
+# Left returns to alpha and collapses it. Move to beta and expand only beta.
+send -- "\033\[D"
+must_expect "> alpha"
+must_expect "beta"
+must_expect "gamma"
+# Re-enter alpha, then move directly from its child to beta. Expanding beta must
+# collapse the previously expanded sibling without a separate collapse action.
+send -- "\033\[C"
+must_expect "> leaf"
+send -- "\033\[B"
+send -- "\033\[C"
+must_expect "alpha"
+must_expect "beta"
+must_expect "\r\n  > one\r\n"
+must_expect "deep"
+must_expect "gamma"
+
+# The same marker and indentation rules continue at the next level.
+send -- "\033\[B"
+send -- "\033\[C"
+must_expect "beta"
+must_expect "\r\n    one\r\n"
+must_expect "deep"
+must_expect "\r\n    > final\r\n"
+must_expect "gamma"
+
+# Each Left returns to the parent and collapses exactly that branch.
+send -- "\033\[D"
+must_expect "beta"
+must_expect "\r\n    one\r\n"
+must_expect "> deep"
+must_expect "gamma"
+send -- "\033\[D"
+must_expect "alpha"
+must_expect "> beta"
+must_expect "gamma"
+
+# Enter is equivalent to Right at both parent and leaf nodes.
+send -- "\r"
+must_expect "beta"
+must_expect "\r\n  > one\r\n"
+must_expect "deep"
+send -- "\033\[B"
+send -- "\r"
+must_expect "deep"
+must_expect "\r\n    > final"
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_TREE_PROMPTecho FINAL"
+
+# The leaf command remains an editable buffer and is never executed.
+send -- "\003"
+after 200
+must_expect "CMDABC_TREE_PROMPT"
+send -- "exit\r"
+
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

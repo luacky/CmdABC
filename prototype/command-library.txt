@@ -1,0 +1,4 @@
+# CmdABC C00 fixed acceptance fixture
+test.one echo ONE
+test.group.two echo TWO
+test.group.three echo THREE
