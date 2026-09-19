@@ -1,0 +1,107 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set runtime [lindex $argv 0]
+set library [lindex $argv 1]
+set preview_style "\033\[2;3m"
+set style_reset "\033\[0m"
+set tar_command {tar -xzf archive.tar.gz}
+set find_command {find . -type f -name "*.log" -mtime +7 -exec ls -lh {} \;}
+set fidelity_command {printf '%s' "$HOME" | cat && echo done; printf '\\' >out 2>>err}
+log_user 0
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: picker exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+proc must_exit_with {expected_status} {
+  expect {
+    eof {}
+    timeout {
+      puts stderr "FAIL: picker did not exit"
+      exit 1
+    }
+  }
+  set result [wait]
+  set actual_status [lindex $result 3]
+  if {$actual_status != $expected_status} {
+    puts stderr "FAIL: picker exited with $actual_status, expected $expected_status"
+    exit 1
+  }
+}
+
+proc must_reach_footer_without {forbidden} {
+  expect {
+    -ex $forbidden {
+      puts stderr "FAIL: parent row exposed leaf command <$forbidden>"
+      exit 1
+    }
+    -ex "Esc cancel" { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for picker footer"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: picker exited before rendering its footer"
+      exit 1
+    }
+  }
+}
+
+# A wide terminal shows complete leaf commands, while a parent row remains
+# command-free. Selecting the nested leaf returns the original bytes only.
+spawn env COLUMNS=120 $runtime pick --library $library --namespace preview
+fconfigure $spawn_id -encoding binary -translation binary
+must_expect "CmdABC  /preview."
+must_expect "> tar  ${preview_style}${tar_command}${style_reset}\r\n"
+must_expect "  find  ${preview_style}${find_command}${style_reset}\r\n"
+must_reach_footer_without $fidelity_command
+send -- "\033\[B\033\[B\033\[C"
+must_expect "  > filtering  ${preview_style}${fidelity_command}${style_reset}\r\n"
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+must_expect "${fidelity_command}\r\n"
+must_exit_with 0
+
+# The preview is shortened inside the available row width. Matching the whole
+# row through CRLF proves the ellipsis stayed on one terminal line.
+set columns 48
+set content_width [expr {$columns - 1}]
+set available [expr {$content_width - [string length "  find"] - 2}]
+set shortened [string range $find_command 0 [expr {$available - 2}]]
+spawn env COLUMNS=$columns $runtime pick --library $library --namespace preview
+fconfigure $spawn_id -encoding binary -translation binary
+must_expect "  find  ${preview_style}${shortened}"
+expect -ex $style_reset
+binary scan $expect_out(buffer) H* preview_tail_hex
+if {$preview_tail_hex ne "e280a61b5b306d"} {
+  puts stderr "FAIL: truncated preview did not end with one ellipsis before reset (hex=$preview_tail_hex)"
+  exit 1
+}
+must_expect "\r\n"
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+must_exit_with 130
+
+# If fewer than eight columns remain, the preview is omitted and the picker
+# continues to accept cancellation normally.
+spawn env COLUMNS=12 $runtime pick --library $library --namespace preview
+fconfigure $spawn_id -encoding binary -translation binary
+must_expect "> tar\r\n"
+must_expect "  find\r\n"
+must_expect "Esc cancel"
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+must_exit_with 130
+
+puts "PASS: leaf preview rendering, truncation, fidelity, and narrow terminal"

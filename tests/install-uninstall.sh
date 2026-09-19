@@ -29,6 +29,13 @@ assert_eq() {
   [ "$1" = "$2" ] || fail "$3 (expected <$2>, got <$1>)"
 }
 
+assert_contains() {
+  case "$1" in
+    *"$2"*) ;;
+    *) fail "$3 (missing <$2>)" ;;
+  esac
+}
+
 install_bash() {
   HOME=$1 SHELL=/bin/bash CMDABC_SHELL=bash "$INSTALLER" >/dev/null
 }
@@ -181,7 +188,17 @@ FRESH_HOME=$TMP_DIR/fresh-home
 mkdir -p "$FRESH_HOME"
 printf 'export CMDABC_USER_SENTINEL=fresh\n' > "$FRESH_HOME/.bashrc"
 cp "$FRESH_HOME/.bashrc" "$TMP_DIR/fresh-rc-before"
-install_bash "$FRESH_HOME"
+FRESH_INSTALL_OUTPUT=$(HOME="$FRESH_HOME" SHELL=/bin/bash CMDABC_SHELL=bash "$INSTALLER")
+
+assert_contains "$FRESH_INSTALL_OUTPUT" \
+  'Existing bash sessions keep any previously loaded CmdABC shell functions.' \
+  'fresh install warns about already-running shell sessions'
+assert_contains "$FRESH_INSTALL_OUTPUT" \
+  'Open a new bash shell, or activate this install in the current shell with:' \
+  'fresh install gives activation choices'
+assert_contains "$FRESH_INSTALL_OUTPUT" \
+  'source "$HOME/.cmdabc/shell/cmdabc.bash"' \
+  'fresh install prints the current-shell reload command'
 
 assert_file "$FRESH_HOME/.cmdabc/cmdabc"
 assert_file "$FRESH_HOME/.cmdabc/uninstall.sh"
@@ -190,6 +207,12 @@ assert_file "$FRESH_HOME/.cmdabc/shell/cmdabc.zsh"
 assert_file "$FRESH_HOME/.cmdabc/VERSION"
 assert_dir "$FRESH_HOME/.cmdabc-data"
 assert_file "$FRESH_HOME/.cmdabc-data/command-library.txt"
+cmp "$REPO_DIR/prototype/cmdabc" "$FRESH_HOME/.cmdabc/cmdabc" \
+  || fail 'installed runtime differs from repository payload'
+cmp "$REPO_DIR/prototype/shell/cmdabc.bash" "$FRESH_HOME/.cmdabc/shell/cmdabc.bash" \
+  || fail 'installed Bash integration differs from repository payload'
+cmp "$REPO_DIR/prototype/shell/cmdabc.zsh" "$FRESH_HOME/.cmdabc/shell/cmdabc.zsh" \
+  || fail 'installed zsh integration differs from repository payload'
 [ ! -s "$FRESH_HOME/.cmdabc-data/command-library.txt" ] || fail 'fresh command library is not empty'
 assert_eq "$(block_count "$FRESH_HOME/.bashrc")" 1 'fresh install block count'
 assert_eq "$(HOME="$FRESH_HOME" "$FRESH_HOME/.cmdabc/cmdabc" --version)" 0.1.0 'installed runtime version'
@@ -302,8 +325,14 @@ if command -v zsh >/dev/null 2>&1; then
   mkdir -p "$ZSH_DOT"
   printf 'typeset -g CMDABC_ZSH_SENTINEL=yes\n' > "$ZSH_DOT/.zshrc"
   cp "$ZSH_DOT/.zshrc" "$TMP_DIR/zsh-rc-before"
-  HOME="$ZSH_HOME" SHELL=$(command -v zsh) CMDABC_SHELL=zsh ZDOTDIR="$ZSH_DOT" \
-    "$INSTALLER" >/dev/null
+  ZSH_INSTALL_OUTPUT=$(HOME="$ZSH_HOME" SHELL=$(command -v zsh) CMDABC_SHELL=zsh \
+    ZDOTDIR="$ZSH_DOT" "$INSTALLER")
+  assert_contains "$ZSH_INSTALL_OUTPUT" \
+    'Existing zsh sessions keep any previously loaded CmdABC shell functions.' \
+    'zsh install warns about already-running shell sessions'
+  assert_contains "$ZSH_INSTALL_OUTPUT" \
+    'source "$HOME/.cmdabc/shell/cmdabc.zsh"' \
+    'zsh install prints the current-shell reload command'
   assert_eq "$(block_count "$ZSH_DOT/.zshrc")" 1 'custom ZDOTDIR block count'
   HOME="$ZSH_HOME" SHELL=$(command -v zsh) ZDOTDIR="$ZSH_DOT" \
     "$ZSH_HOME/.cmdabc/uninstall.sh" >/dev/null

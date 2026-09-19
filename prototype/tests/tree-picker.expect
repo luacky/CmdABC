@@ -4,6 +4,8 @@ set timeout 5
 set bash_bin [lindex $argv 0]
 set prototype_dir [lindex $argv 1]
 set library [lindex $argv 2]
+set preview_style "\033\[2;3m"
+set style_reset "\033\[0m"
 
 proc must_expect {literal} {
   expect {
@@ -31,7 +33,7 @@ must_expect "\r\n  beta"
 must_expect "\r\n  gamma"
 send -- "\033\[C"
 must_expect "\r\n  alpha"
-must_expect "\r\n  > leaf\r\n"
+must_expect "\r\n  > leaf  ${preview_style}echo ALPHA${style_reset}\r\n"
 must_expect "beta"
 must_expect "gamma"
 
@@ -48,7 +50,7 @@ send -- "\033\[B"
 send -- "\033\[C"
 must_expect "alpha"
 must_expect "beta"
-must_expect "\r\n  > one\r\n"
+must_expect "\r\n  > one  ${preview_style}echo ONE${style_reset}\r\n"
 must_expect "deep"
 must_expect "gamma"
 
@@ -56,15 +58,15 @@ must_expect "gamma"
 send -- "\033\[B"
 send -- "\033\[C"
 must_expect "beta"
-must_expect "\r\n    one\r\n"
+must_expect "\r\n    one  ${preview_style}echo ONE${style_reset}\r\n"
 must_expect "deep"
-must_expect "\r\n    > final\r\n"
+must_expect "\r\n    > final  ${preview_style}echo FINAL${style_reset}\r\n"
 must_expect "gamma"
 
 # Each Left returns to the parent and collapses exactly that branch.
 send -- "\033\[D"
 must_expect "beta"
-must_expect "\r\n    one\r\n"
+must_expect "\r\n    one  ${preview_style}echo ONE${style_reset}\r\n"
 must_expect "> deep"
 must_expect "gamma"
 send -- "\033\[D"
@@ -75,7 +77,7 @@ must_expect "gamma"
 # Enter is equivalent to Right at both parent and leaf nodes.
 send -- "\r"
 must_expect "beta"
-must_expect "\r\n  > one\r\n"
+must_expect "\r\n  > one  ${preview_style}echo ONE${style_reset}\r\n"
 must_expect "deep"
 send -- "\033\[B"
 send -- "\r"

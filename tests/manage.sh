@@ -24,6 +24,14 @@ assert_contains() {
     || fail "$3 (missing <$2> in <$1>)"
 }
 
+file_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    sha256sum "$1" | awk '{ print $1 }'
+  fi
+}
+
 assert_unchanged_after_failure() {
   local before=$1
   shift
@@ -160,6 +168,48 @@ assert_unchanged_after_failure "$TMP_DIR/delete-missing-before" \
   "$CMDABC" manage --library "$LIBRARY" --input /abc.del.missing.target
 assert_unchanged_after_failure "$TMP_DIR/delete-reserved-before" \
   "$CMDABC" manage --library "$LIBRARY" --input /abc.del.abc.help
+
+# List is read-only and tolerant: a recognizable incomplete path is reported
+# without hiding valid records or changing the source file.
+SINGLE_INVALID_LIBRARY=$TMP_DIR/list-single-invalid.txt
+printf 'single.one echo ONE\nsingle.bad\nsingle.two echo TWO\n' > "$SINGLE_INVALID_LIBRARY"
+cp "$SINGLE_INVALID_LIBRARY" "$TMP_DIR/list-single-invalid-before"
+single_invalid_sha=$(file_sha256 "$SINGLE_INVALID_LIBRARY")
+single_invalid_output=$($CMDABC manage --library "$SINGLE_INVALID_LIBRARY" --input /abc.list)
+single_invalid_expected=$(printf '2 user commands, 1 invalid entry\nsingle.one echo ONE\nsingle.bad    ???  [invalid: missing command]\nsingle.two echo TWO')
+assert_eq "$single_invalid_output" "$single_invalid_expected" \
+  'list tolerates one invalid record between valid records'
+cmp "$TMP_DIR/list-single-invalid-before" "$SINGLE_INVALID_LIBRARY" \
+  || fail 'list changed the single-invalid library'
+assert_eq "$(file_sha256 "$SINGLE_INVALID_LIBRARY")" "$single_invalid_sha" \
+  'list changed the single-invalid library SHA-256'
+
+# Multiple invalid records at the start, middle, and end remain visible. A row
+# whose path cannot be trusted is identified only by its source line.
+MULTI_INVALID_LIBRARY=$TMP_DIR/list-multiple-invalid.txt
+printf 'multi.first\nmulti.one echo ONE\nmulti.one\nbad..path echo BAD\nmulti.two echo TWO\nmulti.middle\nmulti.three echo THREE\nmulti.last\n' \
+  > "$MULTI_INVALID_LIBRARY"
+cp "$MULTI_INVALID_LIBRARY" "$TMP_DIR/list-multiple-invalid-before"
+multi_invalid_sha=$(file_sha256 "$MULTI_INVALID_LIBRARY")
+multi_invalid_output=$($CMDABC manage --library "$MULTI_INVALID_LIBRARY" --input /abc.list)
+multi_invalid_expected=$(printf '3 user commands, 5 invalid entries\nmulti.first    ???  [invalid: missing command]\nmulti.one echo ONE\nmulti.one    ???  [invalid: missing command]\nline 4    [invalid: malformed entry]\nmulti.two echo TWO\nmulti.middle    ???  [invalid: missing command]\nmulti.three echo THREE\nmulti.last    ???  [invalid: missing command]')
+assert_eq "$multi_invalid_output" "$multi_invalid_expected" \
+  'list preserves valid and invalid source order'
+cmp "$TMP_DIR/list-multiple-invalid-before" "$MULTI_INVALID_LIBRARY" \
+  || fail 'list changed the multiple-invalid library'
+assert_eq "$(file_sha256 "$MULTI_INVALID_LIBRARY")" "$multi_invalid_sha" \
+  'list changed the multiple-invalid library SHA-256'
+
+# Write operations stay strict and fail closed when any malformed record exists.
+LIBRARY=$MULTI_INVALID_LIBRARY
+assert_unchanged_after_failure "$TMP_DIR/malformed-add-before" \
+  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.multi.new echo NEW'
+assert_unchanged_after_failure "$TMP_DIR/malformed-update-before" \
+  "$CMDABC" manage --library "$LIBRARY" --input '/abc.update.multi.one echo CHANGED'
+assert_unchanged_after_failure "$TMP_DIR/malformed-delete-before" \
+  "$CMDABC" manage --library "$LIBRARY" --input /abc.del.multi.one
+assert_eq "$(file_sha256 "$MULTI_INVALID_LIBRARY")" "$multi_invalid_sha" \
+  'strict write failures changed the malformed library SHA-256'
 
 # Parse failures never replace the existing database.
 INVALID_LIBRARY=$TMP_DIR/invalid.txt

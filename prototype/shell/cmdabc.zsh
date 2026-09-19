@@ -30,11 +30,21 @@ cmdabc-dot-widget() {
 
   namespace=${BUFFER#/}
   namespace=${namespace%.}
-  selected=$("$CMDABC_BIN" pick --library "$CMDABC_LIBRARY" --namespace "$namespace")
-  pick_status=$?
+  if selected=$(COLUMNS=${COLUMNS:-80} "$CMDABC_BIN" pick --library "$CMDABC_LIBRARY" --namespace "$namespace"); then
+    pick_status=0
+  else
+    pick_status=$?
+  fi
   if (( pick_status == 0 )) && [[ -n "$selected" ]]; then
     BUFFER=$selected
     CURSOR=${#BUFFER}
+  elif (( pick_status == 5 )); then
+    # The picker returned a captured invalid-entry message, not a command.
+    BUFFER=''
+    CURSOR=0
+    print
+    print -r -- "$selected"
+    zle reset-prompt
   fi
   zle -R
   return 0

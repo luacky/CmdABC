@@ -1,0 +1,4 @@
+# CmdABC leaf-preview acceptance fixture
+preview.tar tar -xzf archive.tar.gz
+preview.find find . -type f -name "*.log" -mtime +7 -exec ls -lh {} \;
+preview.group.filtering printf '%s' "$HOME" | cat && echo done; printf '\\' >out 2>>err

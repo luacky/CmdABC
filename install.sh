@@ -258,4 +258,8 @@ cmdabc_register_shell "$CMDABC_RC_PATH" "$CMDABC_SOURCE_LINE"
 
 printf 'CmdABC %s installed in %s\n' "$CMDABC_PACKAGE_VERSION" "$CMDABC_INSTALL_DIR"
 printf 'User data: %s\n' "$CMDABC_LIBRARY_PATH"
-printf 'Open a new %s shell for the registration to take effect.\n' "$CMDABC_SHELL_KIND"
+printf 'Existing %s sessions keep any previously loaded CmdABC shell functions.\n' \
+  "$CMDABC_SHELL_KIND"
+printf 'Open a new %s shell, or activate this install in the current shell with:\n' \
+  "$CMDABC_SHELL_KIND"
+printf '  %s\n' "$CMDABC_SOURCE_LINE"

@@ -1,0 +1,133 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+set preview_style "\033\[2;3m"
+set invalid_style "\033\[2m"
+set style_reset "\033\[0m"
+set tar_command {tar -xzf archive.tar.gz}
+set find_command {find . -type f -name "*.log"}
+set filtering_command {sudo journalctl -u NetworkManager --since "1 hour ago"}
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+proc must_reach_footer_without {forbidden} {
+  expect {
+    -ex $forbidden {
+      puts stderr "FAIL: parent row exposed nested command <$forbidden>"
+      exit 1
+    }
+    -ex "Esc cancel" { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for picker footer"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited before picker footer"
+      exit 1
+    }
+  }
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env PS1=CMDABC_INVALID_PROMPT CMDABC_LIBRARY=$library $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env PS1=CMDABC_INVALID_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+
+must_expect "CMDABC_INVALID_PROMPT"
+send -- "source $integration\r"
+must_expect "CMDABC_INVALID_PROMPT"
+
+# Valid leaves and parent rendering survive unrelated malformed records. The
+# invalid leaf is visible without a command preview.
+send -- "/dome."
+must_expect "CmdABC  /dome."
+must_expect "> tar  ${preview_style}${tar_command}${style_reset}\r\n"
+must_expect "  find  ${preview_style}${find_command}${style_reset}\r\n"
+must_expect "  a  ${invalid_style}???${style_reset}\r\n"
+must_reach_footer_without $filtering_command
+
+# A valid leaf still fills the exact editable buffer and does not execute it.
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_INVALID_PROMPT${tar_command}"
+send -- "\003"
+after 200
+must_expect "CMDABC_INVALID_PROMPT"
+
+# Expanding the parent shows the nested valid leaf with its preview and exact
+# fillback behavior.
+send -- "/dome."
+must_expect "CmdABC  /dome."
+send -- "\033\[B\033\[B\033\[C"
+must_expect "> filtering  ${preview_style}${filtering_command}${style_reset}"
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\014"
+must_expect "CMDABC_INVALID_PROMPT${filtering_command}"
+send -- "\003"
+after 200
+must_expect "CMDABC_INVALID_PROMPT"
+
+# Selecting the invalid leaf returns no command. The widget clears /dome.,
+# prints a concise error on a fresh line, and restores an immediately usable
+# empty prompt without requiring Ctrl-C.
+if {$shell_kind eq "zsh"} {
+  send -- "setopt ERR_RETURN\r"
+} else {
+  send -- "set -e\r"
+}
+must_expect "CMDABC_INVALID_PROMPT"
+send -- "/dome."
+must_expect "CmdABC  /dome."
+send -- "\033\[B\033\[B\033\[B\r"
+must_expect "\033\[?25h\033\[?1049l"
+must_expect "\r\nCmdABC: invalid command entry\r\n"
+must_expect "  line 6: dome.a\r\n"
+must_expect "  expected: <namespace.path> <command>\r\n"
+must_expect "CMDABC_INVALID_PROMPT"
+
+send -- "echo AFTER_INVALID_OK\r"
+must_expect "AFTER_INVALID_OK"
+must_expect "CMDABC_INVALID_PROMPT"
+
+# The same shell can launch the picker again immediately.
+send -- "/dome."
+must_expect "CmdABC  /dome."
+must_expect "> tar  ${preview_style}${tar_command}${style_reset}"
+must_expect "  a  ${invalid_style}???${style_reset}"
+send -- "\033"
+after 150
+must_expect "\033\[?25h\033\[?1049l"
+send -- "cancel"
+send -- "\014"
+must_expect "CMDABC_INVALID_PROMPT/dome.cancel"
+send -- "\025"
+send -- "exit\r"
+
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

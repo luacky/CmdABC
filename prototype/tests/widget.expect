@@ -7,6 +7,8 @@ set prototype_dir [lindex $argv 2]
 set library [lindex $argv 3]
 set noexec_marker [lindex $argv 4]
 set picker_fidelity_payload [lindex $argv 5]
+set preview_style "\033\[2;3m"
+set style_reset "\033\[0m"
 
 proc must_expect {literal} {
   expect {
@@ -93,6 +95,7 @@ send -- "\025"
 # editable buffer exactly as stored and is not executed.
 send -- "/fidelity."
 must_expect "CmdABC  /fidelity."
+must_expect "> payload  ${preview_style}${picker_fidelity_payload}${style_reset}"
 send -- "\r"
 must_expect "\033\[?25h\033\[?1049l"
 send -- "\014"
@@ -105,7 +108,7 @@ must_expect "CMDABC_TEST_PROMPT"
 # Waiting beyond the escape-suffix timeout makes this distinct from an arrow.
 send -- "/test."
 must_expect "CmdABC  /test."
-must_expect "group ▸"
+must_expect "group"
 send -- "\033"
 after 150
 must_expect "\033\[?25h\033\[?1049l"
@@ -120,26 +123,26 @@ send -- "\025"
 # Root-left is a no-op. Right expands a parent in place and enters its first child.
 send -- "/test."
 must_expect "CmdABC  /test."
-must_expect "group ▸"
+must_expect "group"
 send -- "\033\[D"
 must_expect "CmdABC  /test."
 send -- "\033\[B"
 send -- "\033\[C"
-must_expect "group ▾"
+must_expect "group"
 must_expect "> two"
 # Up/down move across every visible row, including the expanded parent.
 send -- "\033\[A"
-must_expect "> group ▾"
+must_expect "> group"
 send -- "\033\[B"
 must_expect "> two"
 # Left returns to the parent and collapses that branch in place.
 send -- "\033\[D"
 must_expect "CmdABC  /test."
-must_expect "> group ▸"
+must_expect "> group"
 
 # Enter also expands a parent; right on a leaf fills without executing.
 send -- "\r"
-must_expect "group ▾"
+must_expect "group"
 must_expect "> two"
 send -- "\033\[C"
 must_expect "\033\[?25h\033\[?1049l"
@@ -158,10 +161,10 @@ must_expect "CMDABC_TEST_PROMPT"
 # Up wraps to group; Enter on both parent and leaf follows the same path.
 send -- "/test."
 must_expect "CmdABC  /test."
-must_expect "group ▸"
+must_expect "group"
 send -- "\033\[A"
 send -- "\r"
-must_expect "group ▾"
+must_expect "group"
 must_expect "> two"
 send -- "\r"
 must_expect "\033\[?25h\033\[?1049l"

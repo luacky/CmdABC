@@ -1,0 +1,6 @@
+# CmdABC record-level tolerant picker fixture
+dome.tar tar -xzf archive.tar.gz
+dome.find find . -type f -name "*.log"
+dome.log.filtering sudo journalctl -u NetworkManager --since "1 hour ago"
+malformed..path echo MUST_NOT_APPEAR
+dome.a

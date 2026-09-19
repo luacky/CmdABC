@@ -7,6 +7,8 @@ PROTOTYPE_DIR=${TEST_DIR%/tests}
 CMDABC=$PROTOTYPE_DIR/cmdabc
 LIBRARY=$PROTOTYPE_DIR/command-library.txt
 TREE_LIBRARY=$TEST_DIR/tree-library.txt
+PREVIEW_LIBRARY=$TEST_DIR/preview-library.txt
+TOLERANT_LIBRARY=$TEST_DIR/tolerant-library.txt
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmdabc-c00.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -24,6 +26,27 @@ assert_eq "$validation" "OK: 3 command records" "fixed library validates"
 
 tree_validation=$($CMDABC validate --library "$TREE_LIBRARY")
 assert_eq "$tree_validation" "OK: 4 command records" "tree picker fixture validates"
+
+preview_validation=$($CMDABC validate --library "$PREVIEW_LIBRARY")
+assert_eq "$preview_validation" "OK: 3 command records" "preview fixture validates"
+
+if $CMDABC validate --library "$TOLERANT_LIBRARY" >/dev/null 2>&1; then
+  fail "strict validation accepted the tolerant picker fixture"
+fi
+tolerant_children=$($CMDABC children --library "$TOLERANT_LIBRARY" --path dome)
+tolerant_expected=$(printf 'tar\tleaf\ttar -xzf archive.tar.gz\nfind\tleaf\tfind . -type f -name "*.log"\nlog\tparent\t\na\tleaf\t')
+assert_eq "$tolerant_children" "$tolerant_expected" \
+  "tolerant picker keeps valid records and one invalid leaf"
+
+printf 'position.first\nposition.ok echo OK\ninvalid..path echo BAD\nposition.middle\nposition.second echo SECOND\nposition.last\n' \
+  > "$TMP_DIR/tolerant-positions.txt"
+position_children=$($CMDABC children --library "$TMP_DIR/tolerant-positions.txt" --path position)
+position_expected=$(printf 'ok\tleaf\techo OK\nsecond\tleaf\techo SECOND\nfirst\tleaf\t\nmiddle\tleaf\t\nlast\tleaf\t')
+assert_eq "$position_children" "$position_expected" \
+  "multiple invalid records at file boundaries stay isolated"
+if $CMDABC children --library "$TMP_DIR/tolerant-positions.txt" --path invalid >/dev/null 2>&1; then
+  fail "unlocatable malformed path entered the picker tree"
+fi
 
 : > "$TMP_DIR/empty.txt"
 empty_validation=$($CMDABC validate --library "$TMP_DIR/empty.txt")

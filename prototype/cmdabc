@@ -71,10 +71,19 @@ cmdabc_parse_args() {
 
 cmdabc_load_library() {
   local library=$1
-  local line line_number path command prior
+  # Validation and management stay strict. Picker callers opt into tolerant
+  # loading so one locatable entry without a command cannot hide valid rows.
+  local mode=${2:-strict}
+  local line line_number path command prior path_error conflict
+  local pending_index
+  local -a pending_paths pending_lines pending_raw pending_errors
 
   CMDABC_PATHS=()
   CMDABC_COMMANDS=()
+  CMDABC_ENTRY_VALID=()
+  CMDABC_ENTRY_LINES=()
+  CMDABC_ENTRY_RAW=()
+  CMDABC_ENTRY_ERRORS=()
 
   [ -f "$library" ] || { cmdabc_error "library not found: $library"; return 2; }
   [ -r "$library" ] || { cmdabc_error "library is not readable: $library"; return 2; }
@@ -89,61 +98,115 @@ cmdabc_load_library() {
     esac
 
     case "$line" in
-      *[[:space:]]*) ;;
-      *)
-        cmdabc_error "$library:$line_number: missing command delimiter"
-        return 2
-        ;;
-    esac
-
-    path=${line%%[[:space:]]*}
-    command=${line#"$path"}
-    command=${command#?}
-
-    [ -n "$path" ] || { cmdabc_error "$library:$line_number: empty path"; return 2; }
-    [ -n "$command" ] || { cmdabc_error "$library:$line_number: empty command"; return 2; }
-    case "$path" in
-      abc|abc.*)
-        cmdabc_error "$library:$line_number: reserved namespace: abc"
-        return 2
-        ;;
-    esac
-    case "$path" in
-      .*|*.|*..*)
-        cmdabc_error "$library:$line_number: path contains an empty segment: $path"
-        return 2
-        ;;
-    esac
-    case "$path" in
       *[[:space:]]*)
-        cmdabc_error "$library:$line_number: path contains whitespace: $path"
-        return 2
+        path=${line%%[[:space:]]*}
+        command=${line#"$path"}
+        command=${command#?}
+        ;;
+      *)
+        if [ "$mode" = strict ]; then
+          cmdabc_error "$library:$line_number: missing command delimiter"
+          return 2
+        fi
+        path=$line
+        command=''
         ;;
     esac
 
+    path_error=''
+    [ -n "$path" ] || path_error='empty path'
+    case "$path" in
+      abc|abc.*) path_error='reserved namespace: abc' ;;
+      .*|*.|*..*) path_error="path contains an empty segment: $path" ;;
+      *[[:space:]]*) path_error="path contains whitespace: $path" ;;
+    esac
+    if [ -n "$path_error" ]; then
+      if [ "$mode" = strict ]; then
+        cmdabc_error "$library:$line_number: $path_error"
+        return 2
+      fi
+      continue
+    fi
+
+    if ! [[ "$command" =~ [^[:space:]] ]]; then
+      if [ "$mode" = strict ]; then
+        cmdabc_error "$library:$line_number: empty command"
+        return 2
+      fi
+      pending_paths[${#pending_paths[@]}]=$path
+      pending_lines[${#pending_lines[@]}]=$line_number
+      pending_raw[${#pending_raw[@]}]=$line
+      pending_errors[${#pending_errors[@]}]='missing command'
+      continue
+    fi
+
+    conflict=0
     for prior in "${CMDABC_PATHS[@]}"; do
       if [ "$prior" = "$path" ]; then
-        cmdabc_error "$library:$line_number: duplicate path: $path"
-        return 2
+        if [ "$mode" = strict ]; then
+          cmdabc_error "$library:$line_number: duplicate path: $path"
+          return 2
+        fi
+        conflict=1
+        break
       fi
       case "$prior" in
         "$path".*)
-          cmdabc_error "$library:$line_number: node is both leaf and parent: $path"
-          return 2
+          if [ "$mode" = strict ]; then
+            cmdabc_error "$library:$line_number: node is both leaf and parent: $path"
+            return 2
+          fi
+          conflict=1
+          break
           ;;
       esac
       case "$path" in
         "$prior".*)
-          cmdabc_error "$library:$line_number: node is both leaf and parent: $prior"
-          return 2
+          if [ "$mode" = strict ]; then
+            cmdabc_error "$library:$line_number: node is both leaf and parent: $prior"
+            return 2
+          fi
+          conflict=1
+          break
           ;;
       esac
     done
+    [ "$conflict" -eq 0 ] || continue
 
     CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
     CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=$command
+    CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=1
+    CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=$line_number
+    CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=$line
+    CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=''
   done < "$library"
 
+  if [ "$mode" = tolerant ]; then
+    # Add invalid leaves after valid records so an incomplete path can never
+    # shadow an otherwise usable command or namespace branch.
+    pending_index=0
+    while [ "$pending_index" -lt "${#pending_paths[@]}" ]; do
+      path=${pending_paths[$pending_index]}
+      conflict=0
+      for prior in "${CMDABC_PATHS[@]}"; do
+        case "$prior" in
+          "$path"|"$path".*) conflict=1; break ;;
+        esac
+        case "$path" in
+          "$prior".*) conflict=1; break ;;
+        esac
+      done
+      if [ "$conflict" -eq 0 ]; then
+        CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
+        CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=''
+        CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=0
+        CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=${pending_lines[$pending_index]}
+        CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=${pending_raw[$pending_index]}
+        CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=${pending_errors[$pending_index]}
+      fi
+      pending_index=$((pending_index + 1))
+    done
+  fi
 }
 
 cmdabc_load_system_library() {
@@ -161,6 +224,10 @@ cmdabc_load_system_library() {
     /abc.list
     /abc.update.
   )
+  CMDABC_ENTRY_VALID=(1 1 1 1 1)
+  CMDABC_ENTRY_LINES=(0 0 0 0 0)
+  CMDABC_ENTRY_RAW=('' '' '' '' '')
+  CMDABC_ENTRY_ERRORS=('' '' '' '' '')
 }
 
 cmdabc_build_children() {
@@ -170,6 +237,10 @@ cmdabc_build_children() {
   CMDABC_CHILD_NAMES=()
   CMDABC_CHILD_TYPES=()
   CMDABC_CHILD_COMMANDS=()
+  CMDABC_CHILD_VALID=()
+  CMDABC_CHILD_LINES=()
+  CMDABC_CHILD_RAW=()
+  CMDABC_CHILD_ERRORS=()
 
   index=0
   while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
@@ -192,9 +263,17 @@ cmdabc_build_children() {
           if [ "$remainder" = "$name" ]; then
             CMDABC_CHILD_TYPES[${#CMDABC_CHILD_TYPES[@]}]="leaf"
             CMDABC_CHILD_COMMANDS[${#CMDABC_CHILD_COMMANDS[@]}]=${CMDABC_COMMANDS[$index]}
+            CMDABC_CHILD_VALID[${#CMDABC_CHILD_VALID[@]}]=${CMDABC_ENTRY_VALID[$index]}
+            CMDABC_CHILD_LINES[${#CMDABC_CHILD_LINES[@]}]=${CMDABC_ENTRY_LINES[$index]}
+            CMDABC_CHILD_RAW[${#CMDABC_CHILD_RAW[@]}]=${CMDABC_ENTRY_RAW[$index]}
+            CMDABC_CHILD_ERRORS[${#CMDABC_CHILD_ERRORS[@]}]=${CMDABC_ENTRY_ERRORS[$index]}
           else
             CMDABC_CHILD_TYPES[${#CMDABC_CHILD_TYPES[@]}]="parent"
             CMDABC_CHILD_COMMANDS[${#CMDABC_CHILD_COMMANDS[@]}]=""
+            CMDABC_CHILD_VALID[${#CMDABC_CHILD_VALID[@]}]=1
+            CMDABC_CHILD_LINES[${#CMDABC_CHILD_LINES[@]}]=0
+            CMDABC_CHILD_RAW[${#CMDABC_CHILD_RAW[@]}]=''
+            CMDABC_CHILD_ERRORS[${#CMDABC_CHILD_ERRORS[@]}]=''
           fi
         fi
         ;;
@@ -217,7 +296,7 @@ cmdabc_children() {
   [ -n "$CMDABC_PATH_ARG" ] || { cmdabc_error "children requires --path"; return 2; }
   case "$CMDABC_PATH_ARG" in
     abc|abc.*) cmdabc_load_system_library ;;
-    *) cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $? ;;
+    *) cmdabc_load_library "$CMDABC_LIBRARY_ARG" tolerant || return $? ;;
   esac
   cmdabc_build_children "$CMDABC_PATH_ARG"
   [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "path not found: $CMDABC_PATH_ARG"; return 3; }
@@ -409,14 +488,86 @@ cmdabc_rewrite_target() {
 
 cmdabc_manage_list() {
   local library=$1
-  local index=0
+  local index line line_number match_index path command path_error
+  local valid_count=0 record_count=0 invalid_count=0
 
-  cmdabc_load_library "$library" || return $?
-  printf '%s user commands\n' "${#CMDABC_PATHS[@]}"
+  cmdabc_load_library "$library" tolerant || return $?
+
+  index=0
   while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
-    printf '%s %s\n' "${CMDABC_PATHS[$index]}" "${CMDABC_COMMANDS[$index]}"
+    if [ "${CMDABC_ENTRY_VALID[$index]}" -eq 1 ]; then
+      valid_count=$((valid_count + 1))
+    fi
     index=$((index + 1))
   done
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+    record_count=$((record_count + 1))
+  done < "$library"
+  invalid_count=$((record_count - valid_count))
+
+  if [ "$invalid_count" -eq 0 ]; then
+    printf '%s user commands\n' "$valid_count"
+  elif [ "$invalid_count" -eq 1 ]; then
+    printf '%s user commands, 1 invalid entry\n' "$valid_count"
+  else
+    printf '%s user commands, %s invalid entries\n' "$valid_count" "$invalid_count"
+  fi
+
+  line_number=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+
+    match_index=-1
+    index=0
+    while [ "$index" -lt "${#CMDABC_ENTRY_LINES[@]}" ]; do
+      if [ "${CMDABC_ENTRY_LINES[$index]}" -eq "$line_number" ]; then
+        match_index=$index
+        break
+      fi
+      index=$((index + 1))
+    done
+
+    if [ "$match_index" -lt 0 ]; then
+      case "$line" in
+        *[[:space:]]*)
+          path=${line%%[[:space:]]*}
+          command=${line#"$path"}
+          command=${command#?}
+          ;;
+        *)
+          path=$line
+          command=''
+          ;;
+      esac
+      path_error=''
+      [ -n "$path" ] || path_error='malformed entry'
+      case "$path" in
+        abc|abc.*|.*|*.|*..*|*[[:space:]]*) path_error='malformed entry' ;;
+      esac
+      if [ -z "$path_error" ] && ! [[ "$command" =~ [^[:space:]] ]]; then
+        printf '%s    ???  [invalid: missing command]\n' "$path"
+      else
+        printf 'line %s    [invalid: malformed entry]\n' "$line_number"
+      fi
+    elif [ "${CMDABC_ENTRY_VALID[$match_index]}" -eq 1 ]; then
+      printf '%s %s\n' \
+        "${CMDABC_PATHS[$match_index]}" \
+        "${CMDABC_COMMANDS[$match_index]}"
+    else
+      printf '%s    ???  [invalid: %s]\n' \
+        "${CMDABC_PATHS[$match_index]}" \
+        "${CMDABC_ENTRY_ERRORS[$match_index]}"
+    fi
+  done < "$library"
 }
 
 cmdabc_manage_help() {
@@ -496,12 +647,17 @@ cmdabc_append_visible_children() {
   local depth=$2
   local expanded_path=$3
   local index child_path is_expanded
-  local -a child_names child_types child_commands
+  local -a child_names child_types child_commands child_valid child_lines
+  local -a child_raw child_errors
 
   cmdabc_build_children "$parent"
   child_names=("${CMDABC_CHILD_NAMES[@]}")
   child_types=("${CMDABC_CHILD_TYPES[@]}")
   child_commands=("${CMDABC_CHILD_COMMANDS[@]}")
+  child_valid=("${CMDABC_CHILD_VALID[@]}")
+  child_lines=("${CMDABC_CHILD_LINES[@]}")
+  child_raw=("${CMDABC_CHILD_RAW[@]}")
+  child_errors=("${CMDABC_CHILD_ERRORS[@]}")
 
   index=0
   while [ "$index" -lt "${#child_names[@]}" ]; do
@@ -516,6 +672,10 @@ cmdabc_append_visible_children() {
     CMDABC_VISIBLE_NAMES[${#CMDABC_VISIBLE_NAMES[@]}]=${child_names[$index]}
     CMDABC_VISIBLE_TYPES[${#CMDABC_VISIBLE_TYPES[@]}]=${child_types[$index]}
     CMDABC_VISIBLE_COMMANDS[${#CMDABC_VISIBLE_COMMANDS[@]}]=${child_commands[$index]}
+    CMDABC_VISIBLE_VALID[${#CMDABC_VISIBLE_VALID[@]}]=${child_valid[$index]}
+    CMDABC_VISIBLE_LINES[${#CMDABC_VISIBLE_LINES[@]}]=${child_lines[$index]}
+    CMDABC_VISIBLE_RAW[${#CMDABC_VISIBLE_RAW[@]}]=${child_raw[$index]}
+    CMDABC_VISIBLE_ERRORS[${#CMDABC_VISIBLE_ERRORS[@]}]=${child_errors[$index]}
     CMDABC_VISIBLE_PATHS[${#CMDABC_VISIBLE_PATHS[@]}]=$child_path
     CMDABC_VISIBLE_DEPTHS[${#CMDABC_VISIBLE_DEPTHS[@]}]=$depth
     CMDABC_VISIBLE_EXPANDED[${#CMDABC_VISIBLE_EXPANDED[@]}]=$is_expanded
@@ -534,6 +694,10 @@ cmdabc_build_visible() {
   CMDABC_VISIBLE_NAMES=()
   CMDABC_VISIBLE_TYPES=()
   CMDABC_VISIBLE_COMMANDS=()
+  CMDABC_VISIBLE_VALID=()
+  CMDABC_VISIBLE_LINES=()
+  CMDABC_VISIBLE_RAW=()
+  CMDABC_VISIBLE_ERRORS=()
   CMDABC_VISIBLE_PATHS=()
   CMDABC_VISIBLE_DEPTHS=()
   CMDABC_VISIBLE_EXPANDED=()
@@ -558,7 +722,16 @@ cmdabc_find_visible_index() {
 cmdabc_render() {
   local namespace=$1
   local selected=$2
-  local index marker suffix indent depth
+  local index marker suffix indent depth name command preview preview_sgr gap
+  local columns content_width row_width available preview_chars
+
+  columns=${COLUMNS:-80}
+  case "$columns" in
+    ''|*[!0-9]*|0) columns=80 ;;
+  esac
+  content_width=$((10#$columns - 1))
+  [ "$content_width" -ge 1 ] || content_width=1
+  gap='  '
 
   printf '\033[H\033[2J' >&4
   printf 'CmdABC  /%s.\n\n' "$namespace" >&4
@@ -580,7 +753,28 @@ cmdabc_render() {
         suffix=' ▸'
       fi
     fi
-    printf '%s%s%s%s\n' "$indent" "$marker" "${CMDABC_VISIBLE_NAMES[$index]}" "$suffix" >&4
+    name=${CMDABC_VISIBLE_NAMES[$index]}
+    printf '%s%s%s%s' "$indent" "$marker" "$name" "$suffix" >&4
+    if [ "${CMDABC_VISIBLE_TYPES[$index]}" = "leaf" ]; then
+      if [ "${CMDABC_VISIBLE_VALID[$index]}" -eq 1 ]; then
+        command=${CMDABC_VISIBLE_COMMANDS[$index]}
+        preview=$command
+        preview_sgr='2;3'
+      else
+        preview='???'
+        preview_sgr='2'
+      fi
+      row_width=$((${#indent} + ${#marker} + ${#name} + ${#suffix}))
+      available=$((content_width - row_width - ${#gap}))
+      if [ "$available" -ge 8 ]; then
+        if [ "${#preview}" -gt "$available" ]; then
+          preview_chars=$((available - 1))
+          preview=${preview:0:preview_chars}'…'
+        fi
+        printf '%s\033[%sm%s\033[0m' "$gap" "$preview_sgr" "$preview" >&4
+      fi
+    fi
+    printf '\n' >&4
     index=$((index + 1))
   done
   printf '\n↑/↓ select   Enter/Right open   Left back   Esc cancel' >&4
@@ -602,9 +796,28 @@ cmdabc_read_escape_byte() {
   [ -n "$CMDABC_ESCAPE_BYTE" ]
 }
 
+cmdabc_finish_leaf_selection() {
+  local selected=$1
+
+  cmdabc_tty_cleanup
+  trap - EXIT INT TERM HUP
+  if [ "${CMDABC_VISIBLE_VALID[$selected]}" -ne 1 ]; then
+    # Status 5 tells the shell widget to clear its editor buffer and present
+    # this captured message on a fresh line.
+    printf 'CmdABC: invalid command entry\n'
+    printf '  line %s: %s\n' \
+      "${CMDABC_VISIBLE_LINES[$selected]}" \
+      "${CMDABC_VISIBLE_RAW[$selected]}"
+    printf '  expected: <namespace.path> <command>\n'
+    return 5
+  fi
+  printf '%s\n' "${CMDABC_VISIBLE_COMMANDS[$selected]}"
+  return 0
+}
+
 cmdabc_pick() {
   local namespace expanded_path selected_path selected key second third
-  local type path parent_path ancestor_path command status
+  local type path parent_path ancestor_path status
 
   cmdabc_parse_args "$@" || return $?
   [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "pick requires --library"; return 2; }
@@ -617,7 +830,7 @@ cmdabc_pick() {
   if [ "$namespace" = abc ]; then
     cmdabc_load_system_library
   else
-    cmdabc_load_library "$CMDABC_LIBRARY_ARG" || return $?
+    cmdabc_load_library "$CMDABC_LIBRARY_ARG" tolerant || return $?
   fi
   cmdabc_build_children "$namespace"
   [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "namespace not found: $namespace"; return 3; }
@@ -660,11 +873,8 @@ cmdabc_pick() {
           expanded_path=$path
           selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
         else
-          command=${CMDABC_VISIBLE_COMMANDS[$selected]}
-          cmdabc_tty_cleanup
-          trap - EXIT INT TERM HUP
-          printf '%s\n' "$command"
-          return 0
+          cmdabc_finish_leaf_selection "$selected"
+          return $?
         fi
         ;;
       $'\033')
@@ -700,11 +910,8 @@ cmdabc_pick() {
               expanded_path=$path
               selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
             else
-              command=${CMDABC_VISIBLE_COMMANDS[$selected]}
-              cmdabc_tty_cleanup
-              trap - EXIT INT TERM HUP
-              printf '%s\n' "$command"
-              return 0
+              cmdabc_finish_leaf_selection "$selected"
+              return $?
             fi
             ;;
           D)

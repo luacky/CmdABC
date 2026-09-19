@@ -34,11 +34,19 @@ __cmdabc_dot_widget() {
 
   namespace=${READLINE_LINE#/}
   namespace=${namespace%.}
-  selected=$("$CMDABC_BIN" pick --library "$CMDABC_LIBRARY" --namespace "$namespace")
-  pick_status=$?
+  if selected=$(COLUMNS=${COLUMNS:-80} "$CMDABC_BIN" pick --library "$CMDABC_LIBRARY" --namespace "$namespace"); then
+    pick_status=0
+  else
+    pick_status=$?
+  fi
   if [ "$pick_status" -eq 0 ] && [ -n "$selected" ]; then
     READLINE_LINE=$selected
     READLINE_POINT=${#READLINE_LINE}
+  elif [ "$pick_status" -eq 5 ]; then
+    # The picker returned a captured invalid-entry message, not a command.
+    READLINE_LINE=''
+    READLINE_POINT=0
+    printf '\n%s\n' "$selected"
   fi
   return 0
 }
