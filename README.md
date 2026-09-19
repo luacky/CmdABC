@@ -1,66 +1,80 @@
 # CmdABC
 
-**Make shell commands as easy as ABC.**
+**Commands as easy as ABC.**
 
 English | [简体中文](README.zh-CN.md)
 
-CmdABC is a lightweight hierarchical command manager and picker for the shell.
+CmdABC is a lightweight hierarchical command picker and manager for Bash and zsh.
 
-Type `/namespace.` to open a command tree. After you select a leaf command, CmdABC inserts it into the current command line — **it never executes the command automatically**.
+Type a namespace and manually enter the final `.` to open its command tree. Select a leaf to fill the current shell command line — CmdABC never executes it automatically.
 
-## Supported environments
+## Screenshots
 
-CmdABC 0.1.0 supports:
+### Command picker
 
-- macOS with zsh 5.9
-- Bash 5.2 target environments, including macOS, Ubuntu, and ImmortalWrt
+![CmdABC command picker](docs/images/cmdabc-01-command-tree.png)
+
+### Built-in management
+
+![CmdABC management](docs/images/cmdabc-02-management.png)
+
+### Fill, don't execute
+
+![CmdABC command fill](docs/images/cmdabc-03-command-fill.png)
+
+### Invalid entries stay isolated
+
+![CmdABC invalid entry](docs/images/cmdabc-04-invalid-entry.png)
+
+Leaf entries show a dim command preview. Invalid records do not block valid commands; recognizable invalid leaves appear as `???` and report the problem only when selected.
 
 ## Installation
 
-Extract the release package, then run:
+Extract the release package and run:
+
 ```sh
 ./install.sh
 ```
 
 No administrator privileges are required.
 
-Open a new shell after installation for the configuration to take effect.
+Open a new shell after installation. Existing shell sessions keep previously loaded CmdABC functions; the installer also prints how to activate the new installation in the current shell.
 
-CmdABC program files are installed to:
+Program files:
+
 ```text
-~/.cmdabc
+~/.cmdabc/
 ```
 
-Your command library is stored separately at:
+User command library:
+
 ```text
 ~/.cmdabc-data/command-library.txt
 ```
 
-If the command library already exists, installation and reinstallation leave it untouched.
+Installation and reinstallation leave an existing command library untouched.
 
 ## Command picker
 
-Type a namespace followed by a final dot:
+Type the namespace, then manually enter the final dot:
+
 ```text
 /namespace.
 ```
 
-CmdABC opens the matching command tree in place.
+> Pasting the whole `/namespace.` string does not trigger the picker. The final `.` must be typed.
 
-Keyboard controls:
+Controls:
 
 - `↑` / `↓` — move through visible items
 - `→` / `Enter` — expand a parent or select a leaf
 - `←` — return to the parent and collapse
 - `Esc` — cancel
 
-Selecting a leaf only fills the current shell command line. CmdABC does not execute it for you.
-
 ## Managing commands
 
-CmdABC includes a built-in `/abc.*` management namespace.
+CmdABC reserves the `/abc.*` namespace for built-in management:
 
-Available commands:
 ```text
 /abc.help
 /abc.list
@@ -69,41 +83,35 @@ Available commands:
 /abc.del.<target>
 ```
 
-The `abc` and `abc.*` namespaces are reserved for CmdABC itself and cannot be used for user commands.
-
-Commands added or updated through `/abc.*` are stored as data only. They are not executed automatically.
+`/abc.list` can still show valid commands when individual library entries are malformed. Write operations remain strict to avoid rewriting damaged user data.
 
 ## Uninstallation
 
 Run:
+
 ```sh
 ~/.cmdabc/uninstall.sh
 ```
 
-Uninstallation removes CmdABC program files and its managed shell configuration.
+CmdABC removes its program files and managed shell configuration while preserving:
 
-Your command library is preserved:
 ```text
-~/.cmdabc-data/command-library.txt
+~/.cmdabc-data/
 ```
 
-Reinstalling CmdABC will continue to use the existing command library.
+A later reinstall will continue using the same command library.
 
-## Data safety
+## Tested environments
 
-CmdABC keeps program files and user data separate:
-```text
-~/.cmdabc/        # program files
-~/.cmdabc-data/   # user data
-```
+- macOS — zsh 5.9
+- macOS — GNU Bash 5.2
+- Ubuntu — Bash 5.2
+- ImmortalWrt — Bash 5.2
 
-Normal installation, reinstallation, and uninstallation do not overwrite or delete an existing user command library.
+### macOS Bash note
 
-CmdABC also never automatically executes a command selected from the picker.
+The installer manages `~/.bashrc` only. It does not modify `~/.bash_profile` or `~/.profile`. If Bash starts as a login shell, your existing configuration must load `~/.bashrc`.
 
-## Version
+## License
 
-Current release:
-```text
-0.1.0
-```
+[MIT](LICENSE)
