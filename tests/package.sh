@@ -5,7 +5,7 @@ set -euo pipefail
 TEST_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 REPO_DIR=${TEST_DIR%/tests}
 PACKAGE_SCRIPT=$REPO_DIR/scripts/package.sh
-ARCHIVE=$REPO_DIR/artifacts/CmdABC-0.1.0.tar.gz
+ARCHIVE=$REPO_DIR/artifacts/CmdABC-0.2.0.tar.gz
 CHECKSUM=$ARCHIVE.sha256
 WIDGET_EXPECT=$REPO_DIR/prototype/tests/widget.expect
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmdabc-release-test.XXXXXX")
@@ -102,19 +102,27 @@ cmp "$TMP_DIR/first.tar.gz.sha256" "$CHECKSUM" || fail 'repeated build changed c
 
 EXPECTED_SHA=$(awk 'NR == 1 { print $1 }' "$CHECKSUM")
 EXPECTED_NAME=$(awk 'NR == 1 { print $2 }' "$CHECKSUM")
-assert_eq "$EXPECTED_NAME" 'CmdABC-0.1.0.tar.gz' 'checksum filename'
+assert_eq "$EXPECTED_NAME" 'CmdABC-0.2.0.tar.gz' 'checksum filename'
 assert_eq "$(sha256_file "$ARCHIVE")" "$EXPECTED_SHA" 'archive SHA-256'
 
 EXPECTED_LIST=$(printf '%s\n' \
-  'CmdABC-0.1.0/' \
-  'CmdABC-0.1.0/cmdabc' \
-  'CmdABC-0.1.0/install.sh' \
-  'CmdABC-0.1.0/uninstall.sh' \
-  'CmdABC-0.1.0/VERSION' \
-  'CmdABC-0.1.0/README.md' \
-  'CmdABC-0.1.0/shell/' \
-  'CmdABC-0.1.0/shell/cmdabc.bash' \
-  'CmdABC-0.1.0/shell/cmdabc.zsh')
+  'CmdABC-0.2.0/' \
+  'CmdABC-0.2.0/cmdabc' \
+  'CmdABC-0.2.0/install.sh' \
+  'CmdABC-0.2.0/uninstall.sh' \
+  'CmdABC-0.2.0/VERSION' \
+  'CmdABC-0.2.0/README.md' \
+  'CmdABC-0.2.0/README.zh-CN.md' \
+  'CmdABC-0.2.0/LICENSE' \
+  'CmdABC-0.2.0/docs/' \
+  'CmdABC-0.2.0/docs/images/' \
+  'CmdABC-0.2.0/docs/images/cmdabc-01-command-tree.png' \
+  'CmdABC-0.2.0/docs/images/cmdabc-02-management.png' \
+  'CmdABC-0.2.0/docs/images/cmdabc-03-command-fill.png' \
+  'CmdABC-0.2.0/docs/images/cmdabc-04-invalid-entry.png' \
+  'CmdABC-0.2.0/shell/' \
+  'CmdABC-0.2.0/shell/cmdabc.bash' \
+  'CmdABC-0.2.0/shell/cmdabc.zsh')
 assert_eq "$(tar -tzf "$ARCHIVE")" "$EXPECTED_LIST" 'archive allowlist'
 
 if tar -tzf "$ARCHIVE" | grep -E '(^|/)(\.DS_Store|\._|command-library\.txt$)' >/dev/null; then
@@ -129,17 +137,30 @@ fi
 # only the extracted package and the isolated HOME.
 EXTRACT_DIR=$TMP_DIR/extracted
 mkdir -p "$EXTRACT_DIR"
-COPYFILE_DISABLE=1 tar -xzf "$ARCHIVE" -C "$EXTRACT_DIR"
-PACKAGE_ROOT=$EXTRACT_DIR/CmdABC-0.1.0
+if ! EXTRACT_OUTPUT=$(COPYFILE_DISABLE=1 tar -xzf "$ARCHIVE" -C "$EXTRACT_DIR" 2>&1); then
+  fail "archive extraction failed: $EXTRACT_OUTPUT"
+fi
+[ -z "$EXTRACT_OUTPUT" ] || fail "archive extraction emitted diagnostics: $EXTRACT_OUTPUT"
+PACKAGE_ROOT=$EXTRACT_DIR/CmdABC-0.2.0
 
 assert_dir "$PACKAGE_ROOT"
 assert_dir "$PACKAGE_ROOT/shell"
+assert_dir "$PACKAGE_ROOT/docs"
+assert_dir "$PACKAGE_ROOT/docs/images"
 assert_eq "$(file_mode "$PACKAGE_ROOT")" 755 'package root mode'
 assert_eq "$(file_mode "$PACKAGE_ROOT/shell")" 755 'shell directory mode'
+assert_eq "$(file_mode "$PACKAGE_ROOT/docs")" 755 'docs directory mode'
+assert_eq "$(file_mode "$PACKAGE_ROOT/docs/images")" 755 'docs/images directory mode'
 for path in cmdabc install.sh uninstall.sh; do
   assert_eq "$(file_mode "$PACKAGE_ROOT/$path")" 755 "$path mode"
 done
-for path in VERSION README.md shell/cmdabc.bash shell/cmdabc.zsh; do
+for path in VERSION README.md README.zh-CN.md LICENSE \
+  shell/cmdabc.bash shell/cmdabc.zsh \
+  docs/images/cmdabc-01-command-tree.png \
+  docs/images/cmdabc-02-management.png \
+  docs/images/cmdabc-03-command-fill.png \
+  docs/images/cmdabc-04-invalid-entry.png; do
+  assert_file "$PACKAGE_ROOT/$path"
   assert_eq "$(file_mode "$PACKAGE_ROOT/$path")" 644 "$path mode"
 done
 if find "$PACKAGE_ROOT" -type l -print | grep -q .; then
@@ -148,9 +169,9 @@ fi
 if grep -R -F '/Users/sweetcolin/LocalCodex/CmdABC' "$PACKAGE_ROOT" >/dev/null; then
   fail 'package contains the development repository absolute path'
 fi
-assert_eq "$(sed -n '1p' "$PACKAGE_ROOT/VERSION")" 0.1.0 'package VERSION'
+assert_eq "$(sed -n '1p' "$PACKAGE_ROOT/VERSION")" 0.2.0 'package VERSION'
 assert_eq "$(HOME="$TMP_DIR/version-home" "$PACKAGE_ROOT/cmdabc" --version)" \
-  0.1.0 'package runtime version'
+  0.2.0 'package runtime version'
 
 # The extracted package must restore an absent rc to absent for both supported
 # shells, including after a repeated install, without changing user data.
@@ -217,7 +238,7 @@ assert_file "$RELEASE_HOME/.cmdabc-data/command-library.txt"
   || fail 'release install did not create an empty command library'
 assert_eq "$(block_count "$RELEASE_HOME/.bashrc")" 1 'release install rc block count'
 assert_eq "$(HOME="$RELEASE_HOME" "$RELEASE_HOME/.cmdabc/cmdabc" --version)" \
-  0.1.0 'installed release runtime version'
+  0.2.0 'installed release runtime version'
 
 RUNTIME=$RELEASE_HOME/.cmdabc/cmdabc
 LIBRARY=$RELEASE_HOME/.cmdabc-data/command-library.txt
@@ -286,4 +307,4 @@ assert_eq "$(HOME="$RELEASE_HOME" "$RELEASE_HOME/.cmdabc/cmdabc" manage --input 
   $'1 user commands\npersistent.keep printf "KEEP  BYTES"' \
   'release reinstall did not reuse user data'
 
-printf 'PASS: CmdABC 0.1.0 release archive checks\n'
+printf 'PASS: CmdABC 0.2.0 release archive checks\n'

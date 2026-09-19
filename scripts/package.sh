@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-EXPECTED_VERSION=0.1.0
+EXPECTED_VERSION=0.2.0
 PACKAGE_NAME=CmdABC-$EXPECTED_VERSION
 ARCHIVE_NAME=$PACKAGE_NAME.tar.gz
 
@@ -77,7 +77,8 @@ mkdir -p "$OUTPUT_DIR" || package_fail "cannot create output directory: $OUTPUT_
 STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmdabc-package.XXXXXX") \
   || package_fail 'cannot create staging directory'
 PACKAGE_ROOT=$STAGING_DIR/$PACKAGE_NAME
-mkdir -p "$PACKAGE_ROOT/shell" || package_fail 'cannot create package staging layout'
+mkdir -p "$PACKAGE_ROOT/shell" "$PACKAGE_ROOT/docs/images" \
+  || package_fail 'cannot create package staging layout'
 
 # Release contents are an explicit allowlist. Development files are never copied.
 copy_release_file "$REPO_DIR/prototype/cmdabc" "$PACKAGE_ROOT/cmdabc"
@@ -85,13 +86,29 @@ copy_release_file "$REPO_DIR/install.sh" "$PACKAGE_ROOT/install.sh"
 copy_release_file "$REPO_DIR/uninstall.sh" "$PACKAGE_ROOT/uninstall.sh"
 copy_release_file "$REPO_DIR/VERSION" "$PACKAGE_ROOT/VERSION"
 copy_release_file "$REPO_DIR/README.md" "$PACKAGE_ROOT/README.md"
+copy_release_file "$REPO_DIR/README.zh-CN.md" "$PACKAGE_ROOT/README.zh-CN.md"
+copy_release_file "$REPO_DIR/LICENSE" "$PACKAGE_ROOT/LICENSE"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-01-command-tree.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-01-command-tree.png"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-02-management.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-02-management.png"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-03-command-fill.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-03-command-fill.png"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-04-invalid-entry.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-04-invalid-entry.png"
 copy_release_file "$REPO_DIR/prototype/shell/cmdabc.bash" "$PACKAGE_ROOT/shell/cmdabc.bash"
 copy_release_file "$REPO_DIR/prototype/shell/cmdabc.zsh" "$PACKAGE_ROOT/shell/cmdabc.zsh"
 
-chmod 755 "$PACKAGE_ROOT" "$PACKAGE_ROOT/shell"
+chmod 755 "$PACKAGE_ROOT" "$PACKAGE_ROOT/shell" \
+  "$PACKAGE_ROOT/docs" "$PACKAGE_ROOT/docs/images"
 chmod 755 "$PACKAGE_ROOT/cmdabc" "$PACKAGE_ROOT/install.sh" "$PACKAGE_ROOT/uninstall.sh"
 chmod 644 "$PACKAGE_ROOT/VERSION" "$PACKAGE_ROOT/README.md" \
-  "$PACKAGE_ROOT/shell/cmdabc.bash" "$PACKAGE_ROOT/shell/cmdabc.zsh"
+  "$PACKAGE_ROOT/README.zh-CN.md" "$PACKAGE_ROOT/LICENSE" \
+  "$PACKAGE_ROOT/shell/cmdabc.bash" "$PACKAGE_ROOT/shell/cmdabc.zsh" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-01-command-tree.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-02-management.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-03-command-fill.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-04-invalid-entry.png"
 
 if command -v xattr >/dev/null 2>&1; then
   xattr -cr "$PACKAGE_ROOT" || package_fail 'cannot clear staging extended attributes'
@@ -127,6 +144,14 @@ COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 \
   "$PACKAGE_NAME/uninstall.sh" \
   "$PACKAGE_NAME/VERSION" \
   "$PACKAGE_NAME/README.md" \
+  "$PACKAGE_NAME/README.zh-CN.md" \
+  "$PACKAGE_NAME/LICENSE" \
+  "$PACKAGE_NAME/docs" \
+  "$PACKAGE_NAME/docs/images" \
+  "$PACKAGE_NAME/docs/images/cmdabc-01-command-tree.png" \
+  "$PACKAGE_NAME/docs/images/cmdabc-02-management.png" \
+  "$PACKAGE_NAME/docs/images/cmdabc-03-command-fill.png" \
+  "$PACKAGE_NAME/docs/images/cmdabc-04-invalid-entry.png" \
   "$PACKAGE_NAME/shell" \
   "$PACKAGE_NAME/shell/cmdabc.bash" \
   "$PACKAGE_NAME/shell/cmdabc.zsh" \

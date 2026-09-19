@@ -5,6 +5,7 @@ set -eu
 TEST_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 REPO_DIR=${TEST_DIR%/tests}
 INSTALLER=$REPO_DIR/install.sh
+EXPECTED_VERSION=$(sed -n '1p' "$REPO_DIR/VERSION")
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmdabc-c01.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -215,8 +216,10 @@ cmp "$REPO_DIR/prototype/shell/cmdabc.zsh" "$FRESH_HOME/.cmdabc/shell/cmdabc.zsh
   || fail 'installed zsh integration differs from repository payload'
 [ ! -s "$FRESH_HOME/.cmdabc-data/command-library.txt" ] || fail 'fresh command library is not empty'
 assert_eq "$(block_count "$FRESH_HOME/.bashrc")" 1 'fresh install block count'
-assert_eq "$(HOME="$FRESH_HOME" "$FRESH_HOME/.cmdabc/cmdabc" --version)" 0.1.0 'installed runtime version'
-assert_eq "$(sed -n '1p' "$FRESH_HOME/.cmdabc/VERSION")" 0.1.0 'installed VERSION'
+assert_eq "$(HOME="$FRESH_HOME" "$FRESH_HOME/.cmdabc/cmdabc" --version)" \
+  "$EXPECTED_VERSION" 'installed runtime version'
+assert_eq "$(sed -n '1p' "$FRESH_HOME/.cmdabc/VERSION")" \
+  "$EXPECTED_VERSION" 'installed VERSION'
 assert_eq "$(HOME="$FRESH_HOME" CMDABC_LIBRARY= "$FRESH_HOME/.cmdabc/cmdabc" validate)" \
   'OK: 0 command records' 'empty default library validates'
 
@@ -230,7 +233,8 @@ install_bash "$FRESH_HOME"
 cmp "$TMP_DIR/fresh-library-before" "$FRESH_HOME/.cmdabc-data/command-library.txt" \
   || fail 'reinstall changed user data'
 assert_eq "$(block_count "$FRESH_HOME/.bashrc")" 1 'reinstall block count'
-assert_eq "$(HOME="$FRESH_HOME" "$FRESH_HOME/.cmdabc/cmdabc" --version)" 0.1.0 'reinstalled runtime version'
+assert_eq "$(HOME="$FRESH_HOME" "$FRESH_HOME/.cmdabc/cmdabc" --version)" \
+  "$EXPECTED_VERSION" 'reinstalled runtime version'
 assert_file "$FRESH_HOME/.cmdabc/shell/cmdabc.zsh"
 
 # Uninstall removes only the managed block/program and preserves rc/user data.
@@ -288,7 +292,8 @@ printf 'partial user data\n' > "$PARTIAL_HOME/.cmdabc-data/command-library.txt"
 cp "$PARTIAL_HOME/.cmdabc-data/command-library.txt" "$TMP_DIR/partial-library-before"
 printf 'partial\n' > "$PARTIAL_HOME/.cmdabc/cmdabc"
 install_bash "$PARTIAL_HOME"
-assert_eq "$(HOME="$PARTIAL_HOME" "$PARTIAL_HOME/.cmdabc/cmdabc" --version)" 0.1.0 'partial install recovery version'
+assert_eq "$(HOME="$PARTIAL_HOME" "$PARTIAL_HOME/.cmdabc/cmdabc" --version)" \
+  "$EXPECTED_VERSION" 'partial install recovery version'
 assert_file "$PARTIAL_HOME/.cmdabc/uninstall.sh"
 assert_file "$PARTIAL_HOME/.cmdabc/shell/cmdabc.bash"
 assert_file "$PARTIAL_HOME/.cmdabc/shell/cmdabc.zsh"
@@ -313,7 +318,7 @@ cp "$REPO_DIR/VERSION" "$PACKAGE_DIR/VERSION"
 chmod 755 "$PACKAGE_DIR/cmdabc" "$PACKAGE_DIR/install.sh" "$PACKAGE_DIR/uninstall.sh"
 HOME="$PACKAGE_HOME" SHELL=/bin/bash CMDABC_SHELL=bash "$PACKAGE_DIR/install.sh" >/dev/null
 assert_eq "$(HOME="$PACKAGE_HOME" "$PACKAGE_HOME/.cmdabc/cmdabc" --version)" \
-  0.1.0 'release-layout installed version'
+  "$EXPECTED_VERSION" 'release-layout installed version'
 uninstall_bash "$PACKAGE_HOME"
 assert_dir "$PACKAGE_HOME/.cmdabc-data"
 assert_not_exists "$PACKAGE_HOME/.bashrc"
