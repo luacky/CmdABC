@@ -76,12 +76,78 @@ CmdABC 是面向 Bash 和 zsh 的轻量级层级命令选择与管理工具。
 CmdABC 保留 `/abc.*` namespace 用于内置管理：
 
 ```text
+/abc.add.<target> <command>
+/abc.del.<target>
 /abc.help
 /abc.list
-/abc.add.<target> <command>
 /abc.update.<target> <command>
-/abc.del.<target>
 ```
+
+### 添加命令
+
+使用 `/abc.add.<target> <command>` 将自己的命令添加到命令库。
+
+例如：
+
+```text
+/abc.add.git.status git status
+```
+
+这会创建 target `git.status`，对应的命令为：
+
+```text
+git status
+```
+
+添加完成后，输入：
+
+```text
+/git.
+```
+
+即可在 picker 中选择 `status`。
+
+CmdABC 只会把 `git status` 回填到当前命令行，不会自动执行。
+
+target 中的点号用于划分 namespace 层级。例如：
+
+```text
+/abc.add.docker.container.list docker ps -a
+```
+
+会形成：
+
+```text
+docker
+└── container
+    └── list
+```
+
+### 用户命令库
+
+用户命令保存在：
+
+```text
+~/.cmdabc-data/command-library.txt
+```
+
+每条命令占一行，基本格式为：
+
+```text
+<target> <command>
+```
+
+例如：
+
+```text
+git.status git status
+docker.container.list docker ps -a
+system.disk df -h
+```
+
+target 决定命令在 CmdABC namespace 树中的位置，其后的内容是这个 target 对应的实际命令。
+
+推荐使用 `/abc.add` 添加命令，而不是直接手工修改命令库文件。
 
 即使命令库中存在个别格式错误，`/abc.list` 仍会列出其他正常记录；写操作继续保持严格校验，避免意外重写损坏的数据。
 
