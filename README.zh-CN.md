@@ -1,5 +1,7 @@
 # CmdABC
 
+**Commands as easy as ABC.**
+
 CmdABC 是面向 Bash 和 zsh 的轻量命令库与命令选择工具。装好后，只需记住 `/abc.`。
 
 [English](README.md) | 简体中文

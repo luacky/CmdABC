@@ -1,5 +1,7 @@
 # CmdABC
 
+**Commands as easy as ABC.**
+
 CmdABC is a lightweight command library and picker for Bash and zsh. Install it. Remember `/abc.`.
 
 English | [简体中文](README.zh-CN.md)
