@@ -5,7 +5,7 @@ set -euo pipefail
 TEST_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 REPO_DIR=${TEST_DIR%/tests}
 PACKAGE_SCRIPT=$REPO_DIR/scripts/package.sh
-ARCHIVE=$REPO_DIR/artifacts/CmdABC-0.2.0.tar.gz
+ARCHIVE=$REPO_DIR/artifacts/CmdABC-0.3.0.tar.gz
 CHECKSUM=$ARCHIVE.sha256
 WIDGET_EXPECT=$REPO_DIR/prototype/tests/widget.expect
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cmdabc-release-test.XXXXXX")
@@ -58,6 +58,27 @@ created_marker_count() {
   awk '$0 == "# CmdABC-RC-CREATED-BY-INSTALLER" { count += 1 } END { print count + 0 }' "$1"
 }
 
+assert_rejected_management_route() {
+  local input=$1
+  local result
+
+  cp "$LIBRARY" "$TMP_DIR/rejected-route-before"
+  if HOME="$RELEASE_HOME" "$RUNTIME" manage --library "$LIBRARY" \
+    --input "$input" > "$TMP_DIR/rejected-route-stdout" \
+    2> "$TMP_DIR/rejected-route-stderr"; then
+    fail "removed management route succeeded: $input"
+  else
+    result=$?
+  fi
+  assert_eq "$result" 2 "removed management route status: $input"
+  [ ! -s "$TMP_DIR/rejected-route-stdout" ] \
+    || fail "removed management route wrote to stdout: $input"
+  assert_eq "$(cat "$TMP_DIR/rejected-route-stderr")" \
+    '[invalid: malformed entry]' "removed management route error: $input"
+  cmp "$TMP_DIR/rejected-route-before" "$LIBRARY" \
+    || fail "removed management route changed user data: $input"
+}
+
 find_bash52() {
   local candidate version
 
@@ -96,33 +117,37 @@ assert_file "$ARCHIVE"
 assert_file "$CHECKSUM"
 cp "$ARCHIVE" "$TMP_DIR/first.tar.gz"
 cp "$CHECKSUM" "$TMP_DIR/first.tar.gz.sha256"
+FIRST_BUILD_SHA=$(sha256_file "$TMP_DIR/first.tar.gz")
 "$PACKAGE_SCRIPT" >/dev/null
 cmp "$TMP_DIR/first.tar.gz" "$ARCHIVE" || fail 'repeated build changed archive bytes'
 cmp "$TMP_DIR/first.tar.gz.sha256" "$CHECKSUM" || fail 'repeated build changed checksum file'
+SECOND_BUILD_SHA=$(sha256_file "$ARCHIVE")
+assert_eq "$SECOND_BUILD_SHA" "$FIRST_BUILD_SHA" 'repeated build SHA-256'
 
 EXPECTED_SHA=$(awk 'NR == 1 { print $1 }' "$CHECKSUM")
 EXPECTED_NAME=$(awk 'NR == 1 { print $2 }' "$CHECKSUM")
-assert_eq "$EXPECTED_NAME" 'CmdABC-0.2.0.tar.gz' 'checksum filename'
+assert_eq "$EXPECTED_NAME" 'CmdABC-0.3.0.tar.gz' 'checksum filename'
 assert_eq "$(sha256_file "$ARCHIVE")" "$EXPECTED_SHA" 'archive SHA-256'
 
 EXPECTED_LIST=$(printf '%s\n' \
-  'CmdABC-0.2.0/' \
-  'CmdABC-0.2.0/cmdabc' \
-  'CmdABC-0.2.0/install.sh' \
-  'CmdABC-0.2.0/uninstall.sh' \
-  'CmdABC-0.2.0/VERSION' \
-  'CmdABC-0.2.0/README.md' \
-  'CmdABC-0.2.0/README.zh-CN.md' \
-  'CmdABC-0.2.0/LICENSE' \
-  'CmdABC-0.2.0/docs/' \
-  'CmdABC-0.2.0/docs/images/' \
-  'CmdABC-0.2.0/docs/images/cmdabc-01-command-tree.png' \
-  'CmdABC-0.2.0/docs/images/cmdabc-02-management.png' \
-  'CmdABC-0.2.0/docs/images/cmdabc-03-command-fill.png' \
-  'CmdABC-0.2.0/docs/images/cmdabc-04-invalid-entry.png' \
-  'CmdABC-0.2.0/shell/' \
-  'CmdABC-0.2.0/shell/cmdabc.bash' \
-  'CmdABC-0.2.0/shell/cmdabc.zsh')
+  'CmdABC-0.3.0/' \
+  'CmdABC-0.3.0/cmdabc' \
+  'CmdABC-0.3.0/install.sh' \
+  'CmdABC-0.3.0/uninstall.sh' \
+  'CmdABC-0.3.0/VERSION' \
+  'CmdABC-0.3.0/README.md' \
+  'CmdABC-0.3.0/README.zh-CN.md' \
+  'CmdABC-0.3.0/LICENSE' \
+  'CmdABC-0.3.0/docs/' \
+  'CmdABC-0.3.0/docs/images/' \
+  'CmdABC-0.3.0/docs/images/cmdabc-01-command-tree.png' \
+  'CmdABC-0.3.0/docs/images/cmdabc-02-management.png' \
+  'CmdABC-0.3.0/docs/images/cmdabc-03-command-fill.png' \
+  'CmdABC-0.3.0/docs/images/cmdabc-04-list.png' \
+  'CmdABC-0.3.0/docs/images/cmdabc-05-add.png' \
+  'CmdABC-0.3.0/shell/' \
+  'CmdABC-0.3.0/shell/cmdabc.bash' \
+  'CmdABC-0.3.0/shell/cmdabc.zsh')
 assert_eq "$(tar -tzf "$ARCHIVE")" "$EXPECTED_LIST" 'archive allowlist'
 
 if tar -tzf "$ARCHIVE" | grep -E '(^|/)(\.DS_Store|\._|command-library\.txt$)' >/dev/null; then
@@ -141,7 +166,7 @@ if ! EXTRACT_OUTPUT=$(COPYFILE_DISABLE=1 tar -xzf "$ARCHIVE" -C "$EXTRACT_DIR" 2
   fail "archive extraction failed: $EXTRACT_OUTPUT"
 fi
 [ -z "$EXTRACT_OUTPUT" ] || fail "archive extraction emitted diagnostics: $EXTRACT_OUTPUT"
-PACKAGE_ROOT=$EXTRACT_DIR/CmdABC-0.2.0
+PACKAGE_ROOT=$EXTRACT_DIR/CmdABC-0.3.0
 
 assert_dir "$PACKAGE_ROOT"
 assert_dir "$PACKAGE_ROOT/shell"
@@ -159,19 +184,20 @@ for path in VERSION README.md README.zh-CN.md LICENSE \
   docs/images/cmdabc-01-command-tree.png \
   docs/images/cmdabc-02-management.png \
   docs/images/cmdabc-03-command-fill.png \
-  docs/images/cmdabc-04-invalid-entry.png; do
+  docs/images/cmdabc-04-list.png \
+  docs/images/cmdabc-05-add.png; do
   assert_file "$PACKAGE_ROOT/$path"
   assert_eq "$(file_mode "$PACKAGE_ROOT/$path")" 644 "$path mode"
 done
 if find "$PACKAGE_ROOT" -type l -print | grep -q .; then
   fail 'extracted package contains a symlink'
 fi
-if grep -R -F '/Users/sweetcolin/LocalCodex/CmdABC' "$PACKAGE_ROOT" >/dev/null; then
-  fail 'package contains the development repository absolute path'
+if grep -R -E '/Users/[^/[:space:]]+' "$PACKAGE_ROOT" >/dev/null; then
+  fail 'package contains a personal home path'
 fi
-assert_eq "$(sed -n '1p' "$PACKAGE_ROOT/VERSION")" 0.2.0 'package VERSION'
+assert_eq "$(sed -n '1p' "$PACKAGE_ROOT/VERSION")" 0.3.0 'package VERSION'
 assert_eq "$(HOME="$TMP_DIR/version-home" "$PACKAGE_ROOT/cmdabc" --version)" \
-  0.2.0 'package runtime version'
+  0.3.0 'package runtime version'
 
 # The extracted package must restore an absent rc to absent for both supported
 # shells, including after a repeated install, without changing user data.
@@ -238,36 +264,49 @@ assert_file "$RELEASE_HOME/.cmdabc-data/command-library.txt"
   || fail 'release install did not create an empty command library'
 assert_eq "$(block_count "$RELEASE_HOME/.bashrc")" 1 'release install rc block count'
 assert_eq "$(HOME="$RELEASE_HOME" "$RELEASE_HOME/.cmdabc/cmdabc" --version)" \
-  0.2.0 'installed release runtime version'
+  0.3.0 'installed release runtime version'
 
 RUNTIME=$RELEASE_HOME/.cmdabc/cmdabc
 LIBRARY=$RELEASE_HOME/.cmdabc-data/command-library.txt
-HELP_OUTPUT=$(HOME="$RELEASE_HOME" "$RUNTIME" manage --input /abc.help)
-printf '%s\n' "$HELP_OUTPUT" | grep -F '/abc.add.<target> <command>' >/dev/null \
-  || fail 'release /abc.help is incomplete'
+HELP_OUTPUT=$(HOME="$RELEASE_HOME" "$RUNTIME" --help)
+printf '%s\n' "$HELP_OUTPUT" | grep -F '/abc.' >/dev/null \
+  || fail 'release help omits the guided management entry'
+if printf '%s\n' "$HELP_OUTPUT" \
+  | grep -E 'cmdabc (add|manage|pick|children|internal-list)|/abc\.(add|del|update|help|list)' \
+    >/dev/null; then
+  fail 'release help exposes a removed route or internal helper'
+fi
+assert_eq "$(HOME="$RELEASE_HOME" "$RUNTIME" internal-list --library "$LIBRARY")" \
+  '0 commands, 0 invalid' 'empty installed command library list'
 
-NOEXEC_MARKER=$RELEASE_HOME/release-payload-must-not-exist
-ADD_PAYLOAD="printf '%s' \"\$HOME\" | cat && touch \"$NOEXEC_MARKER\"; printf '%s' value\\ with\\ spaces"
-assert_eq "$(HOME="$RELEASE_HOME" "$RUNTIME" manage \
-  --input "/abc.add.release.payload $ADD_PAYLOAD")" \
-  'Added: release.payload' 'release /abc.add'
-[ ! -e "$NOEXEC_MARKER" ] || fail 'release /abc.add executed its payload'
-grep -Fx "release.payload $ADD_PAYLOAD" "$LIBRARY" >/dev/null \
-  || fail 'release /abc.add changed payload text'
-LIST_OUTPUT=$(HOME="$RELEASE_HOME" "$RUNTIME" manage --input /abc.list)
-printf '%s\n' "$LIST_OUTPUT" | grep -Fx "release.payload $ADD_PAYLOAD" >/dev/null \
-  || fail 'release /abc.list changed payload text'
+for removed_input in \
+  '/abc.add' \
+  '/abc.add.release.payload echo NO' \
+  '/abc.del.release.payload' \
+  '/abc.update.release.payload echo NO' \
+  '/abc.help' \
+  '/abc.list'; do
+  assert_rejected_management_route "$removed_input"
+done
 
-UPDATE_PAYLOAD="echo \"\$USER\" | cat && touch \"$NOEXEC_MARKER\"; : >value\\ two"
-assert_eq "$(HOME="$RELEASE_HOME" "$RUNTIME" manage \
-  --input "/abc.update.release.payload $UPDATE_PAYLOAD")" \
-  'Updated: release.payload' 'release /abc.update'
-[ ! -e "$NOEXEC_MARKER" ] || fail 'release /abc.update executed its payload'
-grep -Fx "release.payload $UPDATE_PAYLOAD" "$LIBRARY" >/dev/null \
-  || fail 'release /abc.update changed payload text'
-assert_eq "$(HOME="$RELEASE_HOME" "$RUNTIME" manage --input /abc.del.release.payload)" \
-  'Deleted: release.payload' 'release /abc.del'
-[ ! -s "$LIBRARY" ] || fail 'release /abc.del did not remove its target'
+cp "$LIBRARY" "$TMP_DIR/public-add-before"
+if HOME="$RELEASE_HOME" "$RUNTIME" add --library "$LIBRARY" \
+  > "$TMP_DIR/public-add-stdout" 2> "$TMP_DIR/public-add-stderr"; then
+  fail 'standalone cmdabc add succeeded in the release'
+else
+  public_add_status=$?
+fi
+assert_eq "$public_add_status" 2 'standalone cmdabc add status'
+[ ! -s "$TMP_DIR/public-add-stdout" ] \
+  || fail 'standalone cmdabc add wrote to stdout'
+assert_eq "$(sed -n '1p' "$TMP_DIR/public-add-stderr")" \
+  '[error: unknown command: add]' 'standalone cmdabc add rejection'
+if grep -E 'cmdabc (add|manage|pick|children|internal-list)|/abc\.(add|del|update|help|list)' \
+  "$TMP_DIR/public-add-stderr" >/dev/null; then
+  fail 'standalone cmdabc add error advertised a removed route or internal helper'
+fi
+cmp "$TMP_DIR/public-add-before" "$LIBRARY" \
+  || fail 'standalone cmdabc add changed user data'
 
 # Run the real shell widgets from the installed release, with isolated fixtures.
 PICKER_PAYLOAD=$'printf \'%s\' "$HOME" | cat && :; : >x\\ y'
@@ -303,8 +342,10 @@ HOME="$RELEASE_HOME" SHELL=/bin/bash CMDABC_SHELL=bash "$PACKAGE_ROOT/install.sh
 cmp "$TMP_DIR/library-before-uninstall" "$LIBRARY" \
   || fail 'release reinstall changed existing user data'
 assert_eq "$(block_count "$RELEASE_HOME/.bashrc")" 1 'release reinstall rc block count'
-assert_eq "$(HOME="$RELEASE_HOME" "$RELEASE_HOME/.cmdabc/cmdabc" manage --input /abc.list)" \
-  $'1 user commands\npersistent.keep printf "KEEP  BYTES"' \
+assert_eq "$(HOME="$RELEASE_HOME" "$RELEASE_HOME/.cmdabc/cmdabc" internal-list --library "$LIBRARY")" \
+  $'persistent.keep printf "KEEP  BYTES"\n\n1 commands, 0 invalid' \
   'release reinstall did not reuse user data'
 
-printf 'PASS: CmdABC 0.2.0 release archive checks\n'
+printf 'PASS: CmdABC 0.3.0 release archive checks\n'
+printf 'Build 1 SHA-256: %s\nBuild 2 SHA-256: %s\n' \
+  "$FIRST_BUILD_SHA" "$SECOND_BUILD_SHA"

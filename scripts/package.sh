@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-EXPECTED_VERSION=0.2.0
+EXPECTED_VERSION=0.3.0
 PACKAGE_NAME=CmdABC-$EXPECTED_VERSION
 ARCHIVE_NAME=$PACKAGE_NAME.tar.gz
 
@@ -94,8 +94,10 @@ copy_release_file "$REPO_DIR/docs/images/cmdabc-02-management.png" \
   "$PACKAGE_ROOT/docs/images/cmdabc-02-management.png"
 copy_release_file "$REPO_DIR/docs/images/cmdabc-03-command-fill.png" \
   "$PACKAGE_ROOT/docs/images/cmdabc-03-command-fill.png"
-copy_release_file "$REPO_DIR/docs/images/cmdabc-04-invalid-entry.png" \
-  "$PACKAGE_ROOT/docs/images/cmdabc-04-invalid-entry.png"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-04-list.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-04-list.png"
+copy_release_file "$REPO_DIR/docs/images/cmdabc-05-add.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-05-add.png"
 copy_release_file "$REPO_DIR/prototype/shell/cmdabc.bash" "$PACKAGE_ROOT/shell/cmdabc.bash"
 copy_release_file "$REPO_DIR/prototype/shell/cmdabc.zsh" "$PACKAGE_ROOT/shell/cmdabc.zsh"
 
@@ -108,7 +110,8 @@ chmod 644 "$PACKAGE_ROOT/VERSION" "$PACKAGE_ROOT/README.md" \
   "$PACKAGE_ROOT/docs/images/cmdabc-01-command-tree.png" \
   "$PACKAGE_ROOT/docs/images/cmdabc-02-management.png" \
   "$PACKAGE_ROOT/docs/images/cmdabc-03-command-fill.png" \
-  "$PACKAGE_ROOT/docs/images/cmdabc-04-invalid-entry.png"
+  "$PACKAGE_ROOT/docs/images/cmdabc-04-list.png" \
+  "$PACKAGE_ROOT/docs/images/cmdabc-05-add.png"
 
 if command -v xattr >/dev/null 2>&1; then
   xattr -cr "$PACKAGE_ROOT" || package_fail 'cannot clear staging extended attributes'
@@ -151,7 +154,8 @@ COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 \
   "$PACKAGE_NAME/docs/images/cmdabc-01-command-tree.png" \
   "$PACKAGE_NAME/docs/images/cmdabc-02-management.png" \
   "$PACKAGE_NAME/docs/images/cmdabc-03-command-fill.png" \
-  "$PACKAGE_NAME/docs/images/cmdabc-04-invalid-entry.png" \
+  "$PACKAGE_NAME/docs/images/cmdabc-04-list.png" \
+  "$PACKAGE_NAME/docs/images/cmdabc-05-add.png" \
   "$PACKAGE_NAME/shell" \
   "$PACKAGE_NAME/shell/cmdabc.bash" \
   "$PACKAGE_NAME/shell/cmdabc.zsh" \
