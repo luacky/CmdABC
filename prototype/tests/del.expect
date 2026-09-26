@@ -1,0 +1,185 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+set dim_style "\033\[2m"
+set dim_italic_style "\033\[2;3m"
+set style_reset "\033\[0m"
+source [file join [file dirname [info script]] terminal-screen.tcl]
+if {[info exists env(CMDABC_EXPECT_LOG)]} {
+  log_user 1
+} else {
+  log_user 0
+}
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+proc must_transition_to_del {} {
+  expect {
+    -ex "\033\[?1049h" {
+      puts stderr "FAIL: Del opened a nested alternate screen"
+      exit 1
+    }
+    -ex "\033\[?1049l" {
+      puts stderr "FAIL: picker exited before entering Del state"
+      exit 1
+    }
+    -ex "Delete a command" { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for in-place Del state"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited before entering Del state"
+      exit 1
+    }
+  }
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env PS1=CMDABC_DEL_PROMPT CMDABC_LIBRARY=$library $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env PS1=CMDABC_DEL_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
+
+must_expect "CMDABC_DEL_PROMPT"
+send -- "source $integration\r"
+must_expect "CMDABC_DEL_PROMPT"
+
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\r"
+must_transition_to_del
+must_expect "Type a name like a.b, then press Space"
+must_expect "Space preview   Esc back"
+must_expect "\033\[4;2H\033\[?25h"
+
+# Esc returns to the existing management tree without leaving/re-entering the
+# alternate screen. Re-enter Del from the still-selected row.
+send -- "\033"
+must_expect "CmdABC  /abc."
+send -- "\r"
+must_transition_to_del
+must_expect "Type a name like a.b, then press Space"
+must_expect "Space preview   Esc back"
+
+# An exact target remains ordinary editable text until Space confirms it.
+send -- "aa.aa"
+must_expect "/aa.aa\r\n\r\nSpace preview   Esc back"
+send -- "a"
+must_expect "/aa.aaa\r\n\r\nSpace preview   Esc back"
+send -- "\r"
+must_expect "\[invalid: press Space to confirm name\]"
+must_expect "/aa.aaa"
+
+# Space locks the exact target and shows the real command dim, never italic.
+send -- " "
+must_expect "Check the command, then press Enter"
+must_expect "/aa.aaa ${dim_style}echo AAA${style_reset}"
+expect {
+  -ex $dim_italic_style {
+    puts stderr "FAIL: Del preview used italic styling"
+    exit 1
+  }
+  -ex "Enter delete   Backspace edit   Esc back" {}
+  timeout {
+    puts stderr "FAIL: Del did not enter locked confirmation state"
+    exit 1
+  }
+}
+
+# Backspace unlocks without deleting target text.
+send -- "\177"
+must_expect "/aa.aaa\r\n\r\nSpace preview   Esc back"
+send -- "\025"
+
+# Validation happens at Space and remains in the editor.
+send -- "aaa "
+must_expect "\[invalid: invalid name\]"
+must_expect "/aaa"
+send -- "\025"
+send -- "missing.target "
+must_expect "\[invalid: name not found\]"
+must_expect "/missing.target"
+send -- "\025"
+send -- "dup.target "
+must_expect "\[invalid: name taken\]"
+must_expect "/dup.target"
+send -- "\025"
+
+# Pasted command text locks at its first Space. The suffix is ignored and the
+# preview always comes from the command library.
+send -- "\033\[200~aa.aaa echo FAKE\033\[201~"
+must_expect "/aa.aaa ${dim_style}echo AAA${style_reset}"
+send -- " echo IGNORED"
+must_expect "/aa.aaa ${dim_style}echo AAA${style_reset}"
+
+# Any library change after Space invalidates the lock without deleting.
+set channel [open $library a]
+puts $channel "# concurrent change"
+close $channel
+send -- "\r"
+must_expect "\[error: command library changed, retry\]"
+must_expect "/aa.aaa"
+must_expect "Space preview   Esc back"
+
+# Re-lock against the new snapshot and remove exactly the target record.
+send -- " "
+must_expect "/aa.aaa ${dim_style}echo AAA${style_reset}"
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+cmdabc_assert_stable_success_screen \
+  "CMDABC_DEL_PROMPT/abc" \
+  "success, Removed /aa.aaa" \
+  "CMDABC_DEL_PROMPT"
+
+send -- "echo DEL_RETURN_OK\r"
+must_expect "DEL_RETURN_OK"
+must_expect "CMDABC_DEL_PROMPT"
+
+# A real write-permission failure returns to the shell with one stable error
+# line and one prompt, while preserving the target record.
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\r"
+must_transition_to_del
+send -- "aa.aa "
+must_expect "/aa.aa ${dim_style}echo AA${style_reset}"
+file attributes $library -permissions 0444
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+cmdabc_assert_stable_success_screen \
+  "CMDABC_DEL_PROMPT/abc" \
+  "\[error: failed to remove /aa.aa\]" \
+  "CMDABC_DEL_PROMPT"
+file attributes $library -permissions 0600
+
+send -- "exit\r"
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

@@ -1,0 +1,70 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+set prompt "user@local ~ % "
+source [file join [file dirname [info script]] terminal-screen.tcl]
+log_user 0
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env "PS1=user@local ~ %% " CMDABC_LIBRARY=$library $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env "PS1=$prompt" CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
+
+must_expect $prompt
+send -- "source $integration\r"
+must_expect $prompt
+
+send -- "/abc."
+must_expect "CmdABC  /abc."
+must_expect "> add   \033\[2mAdd a command\033\[0m"
+send -- "\r"
+must_expect "Add a command"
+must_expect "Type a name like a.b, then press Space"
+must_expect "\033\[4;2H\033\[?25h"
+send -- "screen.entry echo SCREEN\r"
+must_expect "\033\[?25h\033\[?1049l"
+
+# Do not send another key until the PTY is quiet. Apply the terminal control
+# stream to a virtual screen and require exactly one durable success line and
+# one editable shell prompt.
+cmdabc_assert_stable_success_screen \
+  "${prompt}/abc" \
+  "success, Added /screen.entry" \
+  $prompt
+
+send -- "echo FINAL_SCREEN_INPUT_OK\r"
+must_expect "FINAL_SCREEN_INPUT_OK"
+must_expect $prompt
+send -- "exit\r"
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

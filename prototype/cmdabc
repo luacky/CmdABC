@@ -15,19 +15,29 @@ fi
 unset CMDABC_SOURCE_DIR CMDABC_VERSION_FILE
 
 cmdabc_usage() {
+  printf 'CmdABC %s\n\n' "${CMDABC_VERSION:-unknown}"
   cat <<'EOF'
-CmdABC 0.1
+Commands as easy as ABC.
 
-Usage:
-  cmdabc validate --library FILE
-  cmdabc children --library FILE --path PATH
-  cmdabc pick --library FILE --namespace NAME
-  cmdabc manage --library FILE --input LINE
+In an interactive Bash or zsh session:
+  /abc.         Manage commands
+  /git.         Open a saved command picker
+
+Options:
+  --version
+  --help
 EOF
 }
 
+CMDABC_ERROR_REASON=''
+CMDABC_DEFER_ERRORS=0
+
 cmdabc_error() {
-  printf 'cmdabc: %s\n' "$*" >&2
+  cmdabc_user_reason "$*"
+  CMDABC_ERROR_REASON=$CMDABC_USER_REASON
+  if [ "$CMDABC_DEFER_ERRORS" -eq 0 ]; then
+    printf '[error: %s]\n' "$CMDABC_ERROR_REASON" >&2
+  fi
 }
 
 cmdabc_parse_args() {
@@ -69,13 +79,23 @@ cmdabc_parse_args() {
   done
 }
 
+cmdabc_classify_source_line() {
+  local line=$1
+
+  CMDABC_LINE_KIND=record
+  if [[ "$line" =~ ^[[:space:]]*$ ]]; then
+    CMDABC_LINE_KIND=blank
+  elif [[ "$line" =~ ^[[:space:]]*# ]]; then
+    CMDABC_LINE_KIND=comment
+  fi
+}
+
 cmdabc_load_library() {
   local library=$1
-  # Validation and management stay strict. Picker callers opt into tolerant
-  # loading so one locatable entry without a command cannot hide valid rows.
   local mode=${2:-strict}
-  local line line_number path command prior path_error conflict
-  local pending_index
+  local line line_number path command target_error has_delimiter
+  local index other count conflict prior
+  local duplicate_lines
   local -a pending_paths pending_lines pending_raw pending_errors
 
   CMDABC_PATHS=()
@@ -84,150 +104,198 @@ cmdabc_load_library() {
   CMDABC_ENTRY_LINES=()
   CMDABC_ENTRY_RAW=()
   CMDABC_ENTRY_ERRORS=()
+  CMDABC_RECORD_PATHS=()
+  CMDABC_RECORD_COMMANDS=()
+  CMDABC_RECORD_VALID=()
+  CMDABC_RECORD_LINES=()
+  CMDABC_RECORD_RAW=()
+  CMDABC_RECORD_ERRORS=()
+  CMDABC_RECORD_LOCATABLE=()
+  CMDABC_RECORD_LABELS=()
 
-  [ -f "$library" ] || { cmdabc_error "library not found: $library"; return 2; }
-  [ -r "$library" ] || { cmdabc_error "library is not readable: $library"; return 2; }
+  [ -f "$library" ] || { cmdabc_error 'command library not found'; return 2; }
+  [ -r "$library" ] || { cmdabc_error 'command library is not readable'; return 2; }
 
   line_number=0
-  while IFS= read -r line || [ -n "$line" ]; do
+  if ! while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
 
-    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    case "$line" in
-      \#*) continue ;;
-    esac
+    cmdabc_classify_source_line "$line"
+    [ "$CMDABC_LINE_KIND" = record ] || continue
 
+    has_delimiter=0
     case "$line" in
       *[[:space:]]*)
+        has_delimiter=1
         path=${line%%[[:space:]]*}
         command=${line#"$path"}
         command=${command#?}
         ;;
       *)
-        if [ "$mode" = strict ]; then
-          cmdabc_error "$library:$line_number: missing command delimiter"
-          return 2
-        fi
         path=$line
         command=''
         ;;
     esac
 
-    path_error=''
-    [ -n "$path" ] || path_error='empty path'
-    case "$path" in
-      abc|abc.*) path_error='reserved namespace: abc' ;;
-      .*|*.|*..*) path_error="path contains an empty segment: $path" ;;
-      *[[:space:]]*) path_error="path contains whitespace: $path" ;;
-    esac
-    if [ -n "$path_error" ]; then
-      if [ "$mode" = strict ]; then
-        cmdabc_error "$library:$line_number: $path_error"
-        return 2
-      fi
-      continue
+    cmdabc_classify_target "$path"
+    target_error=$CMDABC_TARGET_ERROR
+    if [ "$has_delimiter" -eq 0 ] && [ -n "$target_error" ]; then
+      target_error='malformed entry'
+    elif [ -z "$target_error" ] && ! [[ "$command" =~ [^[:space:]] ]]; then
+      target_error='missing command'
     fi
 
-    if ! [[ "$command" =~ [^[:space:]] ]]; then
-      if [ "$mode" = strict ]; then
-        cmdabc_error "$library:$line_number: empty command"
+    index=${#CMDABC_RECORD_PATHS[@]}
+    CMDABC_RECORD_PATHS[$index]=$path
+    CMDABC_RECORD_COMMANDS[$index]=$command
+    CMDABC_RECORD_LINES[$index]=$line_number
+    CMDABC_RECORD_RAW[$index]=$line
+    CMDABC_RECORD_ERRORS[$index]=$target_error
+    CMDABC_RECORD_VALID[$index]=0
+    CMDABC_RECORD_LOCATABLE[$index]=0
+    CMDABC_RECORD_LABELS[$index]=$path
+    if [ -z "$CMDABC_TARGET_ERROR" ]; then
+      CMDABC_RECORD_LOCATABLE[$index]=1
+    fi
+    if [ "$target_error" = 'malformed entry' ]; then
+      CMDABC_RECORD_LABELS[$index]=''
+    fi
+  done < "$library" 2>/dev/null; then
+    cmdabc_error 'command library is not readable'
+    return 2
+  fi
+
+  # A repeated target is ambiguous. Mark every occurrence and exclude all of
+  # them from the executable tree instead of silently choosing the first.
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_LOCATABLE[$index]}" -eq 1 ]; then
+      path=${CMDABC_RECORD_PATHS[$index]}
+      count=0
+      duplicate_lines=''
+      other=0
+      while [ "$other" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+        if [ "${CMDABC_RECORD_LOCATABLE[$other]}" -eq 1 ] \
+          && [ "${CMDABC_RECORD_PATHS[$other]}" = "$path" ]; then
+          count=$((count + 1))
+          if [ -z "$duplicate_lines" ]; then
+            duplicate_lines=${CMDABC_RECORD_LINES[$other]}
+          elif [ "$count" -eq 2 ]; then
+            duplicate_lines="$duplicate_lines and ${CMDABC_RECORD_LINES[$other]}"
+          else
+            duplicate_lines="$duplicate_lines, ${CMDABC_RECORD_LINES[$other]}"
+          fi
+        fi
+        other=$((other + 1))
+      done
+      if [ "$count" -gt 1 ]; then
+        CMDABC_RECORD_ERRORS[$index]='duplicate target'
+      fi
+    fi
+    index=$((index + 1))
+  done
+
+  # Two valid commands cannot make the same node both a leaf and a parent.
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ -z "${CMDABC_RECORD_ERRORS[$index]}" ]; then
+      path=${CMDABC_RECORD_PATHS[$index]}
+      other=0
+      while [ "$other" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+        if [ "$other" -ne "$index" ] && [ -z "${CMDABC_RECORD_ERRORS[$other]}" ]; then
+          prior=${CMDABC_RECORD_PATHS[$other]}
+          case "$prior" in
+            "$path".*)
+              CMDABC_RECORD_ERRORS[$index]='invalid target'
+              CMDABC_RECORD_ERRORS[$other]='invalid target'
+              ;;
+          esac
+          case "$path" in
+            "$prior".*)
+              CMDABC_RECORD_ERRORS[$index]='invalid target'
+              CMDABC_RECORD_ERRORS[$other]='invalid target'
+              ;;
+          esac
+        fi
+        other=$((other + 1))
+      done
+    fi
+    index=$((index + 1))
+  done
+
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ -z "${CMDABC_RECORD_ERRORS[$index]}" ]; then
+      CMDABC_RECORD_VALID[$index]=1
+      CMDABC_PATHS[${#CMDABC_PATHS[@]}]=${CMDABC_RECORD_PATHS[$index]}
+      CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=${CMDABC_RECORD_COMMANDS[$index]}
+      CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=1
+      CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=${CMDABC_RECORD_LINES[$index]}
+      CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=${CMDABC_RECORD_RAW[$index]}
+      CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=''
+    elif [ "${CMDABC_RECORD_ERRORS[$index]}" = 'missing command' ] \
+      && [ "${CMDABC_RECORD_LOCATABLE[$index]}" -eq 1 ]; then
+      pending_paths[${#pending_paths[@]}]=${CMDABC_RECORD_PATHS[$index]}
+      pending_lines[${#pending_lines[@]}]=${CMDABC_RECORD_LINES[$index]}
+      pending_raw[${#pending_raw[@]}]=${CMDABC_RECORD_RAW[$index]}
+      pending_errors[${#pending_errors[@]}]=${CMDABC_RECORD_ERRORS[$index]}
+    fi
+    index=$((index + 1))
+  done
+
+  if [ "$mode" = strict ]; then
+    index=0
+    while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+      if [ "${CMDABC_RECORD_VALID[$index]}" -ne 1 ]; then
+        cmdabc_print_invalid "${CMDABC_RECORD_ERRORS[$index]}"
         return 2
       fi
-      pending_paths[${#pending_paths[@]}]=$path
-      pending_lines[${#pending_lines[@]}]=$line_number
-      pending_raw[${#pending_raw[@]}]=$line
-      pending_errors[${#pending_errors[@]}]='missing command'
-      continue
-    fi
+      index=$((index + 1))
+    done
+    return 0
+  fi
 
+  # Locatable missing-command records remain visible as invalid tree leaves,
+  # unless they would shadow a usable command or namespace.
+  index=0
+  while [ "$index" -lt "${#pending_paths[@]}" ]; do
+    path=${pending_paths[$index]}
     conflict=0
     for prior in "${CMDABC_PATHS[@]}"; do
-      if [ "$prior" = "$path" ]; then
-        if [ "$mode" = strict ]; then
-          cmdabc_error "$library:$line_number: duplicate path: $path"
-          return 2
-        fi
-        conflict=1
-        break
-      fi
       case "$prior" in
-        "$path".*)
-          if [ "$mode" = strict ]; then
-            cmdabc_error "$library:$line_number: node is both leaf and parent: $path"
-            return 2
-          fi
-          conflict=1
-          break
-          ;;
+        "$path"|"$path".*) conflict=1; break ;;
       esac
       case "$path" in
-        "$prior".*)
-          if [ "$mode" = strict ]; then
-            cmdabc_error "$library:$line_number: node is both leaf and parent: $prior"
-            return 2
-          fi
-          conflict=1
-          break
-          ;;
+        "$prior".*) conflict=1; break ;;
       esac
     done
-    [ "$conflict" -eq 0 ] || continue
-
-    CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
-    CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=$command
-    CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=1
-    CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=$line_number
-    CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=$line
-    CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=''
-  done < "$library"
-
-  if [ "$mode" = tolerant ]; then
-    # Add invalid leaves after valid records so an incomplete path can never
-    # shadow an otherwise usable command or namespace branch.
-    pending_index=0
-    while [ "$pending_index" -lt "${#pending_paths[@]}" ]; do
-      path=${pending_paths[$pending_index]}
-      conflict=0
-      for prior in "${CMDABC_PATHS[@]}"; do
-        case "$prior" in
-          "$path"|"$path".*) conflict=1; break ;;
-        esac
-        case "$path" in
-          "$prior".*) conflict=1; break ;;
-        esac
-      done
-      if [ "$conflict" -eq 0 ]; then
-        CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
-        CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=''
-        CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=0
-        CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=${pending_lines[$pending_index]}
-        CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=${pending_raw[$pending_index]}
-        CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=${pending_errors[$pending_index]}
-      fi
-      pending_index=$((pending_index + 1))
-    done
-  fi
+    if [ "$conflict" -eq 0 ]; then
+      CMDABC_PATHS[${#CMDABC_PATHS[@]}]=$path
+      CMDABC_COMMANDS[${#CMDABC_COMMANDS[@]}]=''
+      CMDABC_ENTRY_VALID[${#CMDABC_ENTRY_VALID[@]}]=0
+      CMDABC_ENTRY_LINES[${#CMDABC_ENTRY_LINES[@]}]=${pending_lines[$index]}
+      CMDABC_ENTRY_RAW[${#CMDABC_ENTRY_RAW[@]}]=${pending_raw[$index]}
+      CMDABC_ENTRY_ERRORS[${#CMDABC_ENTRY_ERRORS[@]}]=${pending_errors[$index]}
+    fi
+    index=$((index + 1))
+  done
 }
 
 cmdabc_load_system_library() {
   CMDABC_PATHS=(
     abc.add
     abc.del
-    abc.help
     abc.list
-    abc.update
   )
   CMDABC_COMMANDS=(
-    /abc.add.
-    /abc.del.
-    /abc.help
-    /abc.list
-    /abc.update.
+    'Add a command'
+    'Remove a command'
+    'View commands and errors'
   )
-  CMDABC_ENTRY_VALID=(1 1 1 1 1)
-  CMDABC_ENTRY_LINES=(0 0 0 0 0)
-  CMDABC_ENTRY_RAW=('' '' '' '' '')
-  CMDABC_ENTRY_ERRORS=('' '' '' '' '')
+  CMDABC_ENTRY_VALID=(1 1 1)
+  CMDABC_ENTRY_LINES=(0 0 0)
+  CMDABC_ENTRY_RAW=('' '' '')
+  CMDABC_ENTRY_ERRORS=('' '' '')
 }
 
 cmdabc_build_children() {
@@ -299,7 +367,8 @@ cmdabc_children() {
     *) cmdabc_load_library "$CMDABC_LIBRARY_ARG" tolerant || return $? ;;
   esac
   cmdabc_build_children "$CMDABC_PATH_ARG"
-  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "path not found: $CMDABC_PATH_ARG"; return 3; }
+  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] \
+    || { cmdabc_print_invalid 'target not found'; return 3; }
 
   index=0
   while [ "$index" -lt "${#CMDABC_CHILD_NAMES[@]}" ]; do
@@ -319,12 +388,18 @@ cmdabc_write_cleanup() {
   fi
 }
 
+cmdabc_abort_write() {
+  cmdabc_write_cleanup
+  CMDABC_WRITE_TEMP=''
+  trap - EXIT INT TERM HUP
+}
+
 cmdabc_read_file_exact() {
   local output_name=$1
   local path=$2
   local value
 
-  value=$(cat "$path"; printf '\001') || return 1
+  value=$({ cat "$path" || exit 1; printf '\001'; } 2>/dev/null) || return 1
   value=${value%$'\001'}
   printf -v "$output_name" '%s' "$value"
 }
@@ -332,12 +407,44 @@ cmdabc_read_file_exact() {
 cmdabc_validate_user_target() {
   local target=$1
 
-  [ -n "$target" ] || { cmdabc_error "target is empty"; return 2; }
+  cmdabc_classify_target "$target"
+  [ -z "$CMDABC_TARGET_ERROR" ] || return 2
+}
+
+cmdabc_classify_target() {
+  local target=$1
+
+  CMDABC_TARGET_ERROR=''
+  [ -n "$target" ] || { CMDABC_TARGET_ERROR='invalid target'; return 0; }
   case "$target" in
-    \#*) cmdabc_error "target cannot start with #: $target"; return 2 ;;
-    .*|*.|*..*) cmdabc_error "target contains an empty segment: $target"; return 2 ;;
-    *[[:space:]]*) cmdabc_error "target contains whitespace: $target"; return 2 ;;
-    abc|abc.*) cmdabc_error "target uses reserved namespace: abc"; return 2 ;;
+    .*|*.|*..*) CMDABC_TARGET_ERROR='empty namespace segment'; return 0 ;;
+    abc|abc.*) CMDABC_TARGET_ERROR='reserved namespace'; return 0 ;;
+    *[!A-Za-z0-9_.-]*) CMDABC_TARGET_ERROR='unsupported target character'; return 0 ;;
+  esac
+  case "$target" in
+    *.*) ;;
+    *) CMDABC_TARGET_ERROR='invalid target'; return 0 ;;
+  esac
+  if ! [[ "$target" =~ ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$ ]]; then
+    CMDABC_TARGET_ERROR='unsupported target character'
+  fi
+}
+
+cmdabc_print_invalid() {
+  cmdabc_user_reason "$1"
+  printf '[invalid: %s]\n' "$CMDABC_USER_REASON" >&2
+}
+
+cmdabc_user_reason() {
+  case "$1" in
+    'duplicate target') CMDABC_USER_REASON='name taken' ;;
+    'invalid target') CMDABC_USER_REASON='invalid name' ;;
+    'target not found') CMDABC_USER_REASON='name not found' ;;
+    'unsupported target character') CMDABC_USER_REASON='unsupported name character' ;;
+    'empty namespace segment') CMDABC_USER_REASON='empty name segment' ;;
+    'press Space to confirm target') CMDABC_USER_REASON='press Space to confirm name' ;;
+    'failed to remove target') CMDABC_USER_REASON='failed to remove name' ;;
+    *) CMDABC_USER_REASON=$1 ;;
   esac
 }
 
@@ -358,79 +465,106 @@ cmdabc_find_path_index() {
 
 cmdabc_check_new_target() {
   local target=$1
-  local prior
+  local index prior
 
-  for prior in "${CMDABC_PATHS[@]}"; do
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_LOCATABLE[$index]}" -ne 1 ]; then
+      index=$((index + 1))
+      continue
+    fi
+    prior=${CMDABC_RECORD_PATHS[$index]}
     if [ "$prior" = "$target" ]; then
-      cmdabc_error "target already exists: $target"
+      CMDABC_INVALID_REASON='duplicate target'
       return 3
     fi
     case "$prior" in
       "$target".*)
-        cmdabc_error "target is already a parent: $target"
+        CMDABC_INVALID_REASON='invalid target'
         return 3
         ;;
     esac
     case "$target" in
       "$prior".*)
-        cmdabc_error "target is below an existing command: $prior"
+        CMDABC_INVALID_REASON='invalid target'
         return 3
         ;;
     esac
+    index=$((index + 1))
   done
 }
 
 cmdabc_prepare_write_temp() {
   local library=$1
+  local failure_reason=${2:-failed to update command library}
   local parent=${library%/*}
 
-  [ ! -L "$library" ] || { cmdabc_error "refusing to modify symlink library: $library"; return 2; }
-  [ -f "$library" ] || { cmdabc_error "library not found: $library"; return 2; }
-  [ -r "$library" ] || { cmdabc_error "library is not readable: $library"; return 2; }
-  [ -w "$library" ] || { cmdabc_error "library is not writable: $library"; return 2; }
+  [ ! -L "$library" ] || { cmdabc_error 'command library is not writable'; return 2; }
+  [ -f "$library" ] || { cmdabc_error 'command library not found'; return 2; }
+  [ -r "$library" ] || { cmdabc_error 'command library is not readable'; return 2; }
+  [ -w "$library" ] || { cmdabc_error 'command library is not writable'; return 2; }
   [ -d "$parent" ] && [ -w "$parent" ] \
-    || { cmdabc_error "library directory is not writable: $parent"; return 2; }
+    || { cmdabc_error 'command library is not writable'; return 2; }
 
   CMDABC_WRITE_TEMP=$library.cmdabc.$$
   if [ -e "$CMDABC_WRITE_TEMP" ] || [ -L "$CMDABC_WRITE_TEMP" ]; then
-    cmdabc_error "temporary path already exists: $CMDABC_WRITE_TEMP"
+    cmdabc_error "$failure_reason"
     CMDABC_WRITE_TEMP=''
     return 2
   fi
-  cp -p "$library" "$CMDABC_WRITE_TEMP" \
-    || { cmdabc_error "cannot prepare library update"; CMDABC_WRITE_TEMP=''; return 2; }
+  cp -p "$library" "$CMDABC_WRITE_TEMP" 2>/dev/null \
+    || { cmdabc_error "$failure_reason"; cmdabc_abort_write; return 2; }
   trap 'cmdabc_write_cleanup; exit 130' INT TERM HUP
   trap 'cmdabc_write_cleanup' EXIT
 }
 
 cmdabc_commit_write_temp() {
   local library=$1
+  local failure_reason=${2:-failed to update command library}
+  local status
 
-  cmdabc_load_library "$CMDABC_WRITE_TEMP" || return $?
-  mv -f "$CMDABC_WRITE_TEMP" "$library" || { cmdabc_error "cannot replace library"; return 2; }
+  if cmdabc_load_library "$CMDABC_WRITE_TEMP" tolerant; then
+    :
+  else
+    status=$?
+    cmdabc_abort_write
+    return "$status"
+  fi
+  mv -f "$CMDABC_WRITE_TEMP" "$library" 2>/dev/null \
+    || { cmdabc_error "$failure_reason"; cmdabc_abort_write; return 2; }
   CMDABC_WRITE_TEMP=''
   trap - EXIT INT TERM HUP
 }
 
-cmdabc_manage_add() {
+cmdabc_add_record() {
   local library=$1
   local target=$2
   local command=$3
   local content
 
-  cmdabc_validate_user_target "$target" || return $?
-  [[ "$command" =~ [^[:space:]] ]] || { cmdabc_error "add command is empty"; return 2; }
-  cmdabc_load_library "$library" || return $?
+  CMDABC_INVALID_REASON=''
+  cmdabc_validate_user_target "$target" \
+    || { CMDABC_INVALID_REASON=$CMDABC_TARGET_ERROR; return 2; }
+  [[ "$command" =~ [^[:space:]] ]] \
+    || { CMDABC_INVALID_REASON='missing command'; return 2; }
+  cmdabc_load_library "$library" tolerant || return $?
   cmdabc_check_new_target "$target" || return $?
-  cmdabc_prepare_write_temp "$library" || return $?
-  cmdabc_read_file_exact content "$library" || { cmdabc_error "cannot read library"; return 2; }
+  cmdabc_prepare_write_temp "$library" 'failed to update command library' || return $?
+  cmdabc_read_file_exact content "$library" \
+    || { cmdabc_error 'command library is not readable'; cmdabc_abort_write; return 2; }
   if [ -n "$content" ] && [[ "$content" != *$'\n' ]]; then
-    printf '\n' >> "$CMDABC_WRITE_TEMP" || { cmdabc_error "cannot append library record"; return 2; }
+    printf '\n' >> "$CMDABC_WRITE_TEMP" 2>/dev/null \
+      || { cmdabc_error 'failed to update command library'; cmdabc_abort_write; return 2; }
   fi
-  printf '%s %s\n' "$target" "$command" >> "$CMDABC_WRITE_TEMP" \
-    || { cmdabc_error "cannot append library record"; return 2; }
-  cmdabc_commit_write_temp "$library" || return $?
-  printf 'Added: %s\n' "$target"
+  printf '%s %s\n' "$target" "$command" >> "$CMDABC_WRITE_TEMP" 2>/dev/null \
+    || { cmdabc_error 'failed to update command library'; cmdabc_abort_write; return 2; }
+  cmdabc_commit_write_temp "$library" 'failed to update command library' || return $?
+  CMDABC_ADDED_TARGET=$target
+}
+
+cmdabc_print_added() {
+  local target=$1
+  printf 'success, Added /%s\n' "$target"
 }
 
 cmdabc_rewrite_target() {
@@ -438,199 +572,162 @@ cmdabc_rewrite_target() {
   local library=$2
   local target=$3
   local command=${4:-}
-  local line status path output_line
+  local expected_raw=${5:-}
+  local check_expected=${6:-0}
+  local suppress_success=${7:-0}
+  local failure_reason='failed to update command library'
+  local line status output_line line_number index match_count target_line target_raw
 
-  cmdabc_validate_user_target "$target" || return $?
-  cmdabc_load_library "$library" || return $?
-  cmdabc_find_path_index "$target" \
-    || { cmdabc_error "target not found: $target"; return 3; }
-  if [ "$operation" = update ]; then
-    [[ "$command" =~ [^[:space:]] ]] || { cmdabc_error "update command is empty"; return 2; }
+  if [ "$operation" = delete ]; then
+    failure_reason="failed to remove /$target"
   fi
 
-  cmdabc_prepare_write_temp "$library" || return $?
-  : > "$CMDABC_WRITE_TEMP" || { cmdabc_error "cannot write temporary library"; return 2; }
-  while :; do
+  CMDABC_INVALID_REASON=''
+  cmdabc_validate_user_target "$target" \
+    || { cmdabc_print_invalid "$CMDABC_TARGET_ERROR"; return 2; }
+  cmdabc_load_library "$library" tolerant || return $?
+  match_count=0
+  target_line=0
+  target_raw=''
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_LOCATABLE[$index]}" -eq 1 ] \
+      && [ "${CMDABC_RECORD_PATHS[$index]}" = "$target" ]; then
+      match_count=$((match_count + 1))
+      target_line=${CMDABC_RECORD_LINES[$index]}
+      target_raw=${CMDABC_RECORD_RAW[$index]}
+    fi
+    index=$((index + 1))
+  done
+  if [ "$check_expected" -eq 1 ] \
+    && { [ "$match_count" -ne 1 ] || [ "$target_raw" != "$expected_raw" ]; }; then
+    cmdabc_error 'command library changed, retry'
+    return 4
+  fi
+  if [ "$match_count" -gt 1 ]; then
+    cmdabc_print_invalid 'duplicate target'
+    return 3
+  fi
+  if [ "$match_count" -eq 0 ]; then
+    cmdabc_print_invalid 'target not found'
+    return 3
+  fi
+  if [ "$operation" = update ]; then
+    [[ "$command" =~ [^[:space:]] ]] \
+      || { cmdabc_print_invalid 'missing command'; return 2; }
+  fi
+
+  cmdabc_prepare_write_temp "$library" "$failure_reason" || return $?
+  : > "$CMDABC_WRITE_TEMP" 2>/dev/null \
+    || { cmdabc_error "$failure_reason"; cmdabc_abort_write; return 2; }
+  line_number=0
+  if ! while :; do
     line=''
     IFS= read -r line
     status=$?
     if [ "$status" -ne 0 ] && [ -z "$line" ]; then
       break
     fi
+    line_number=$((line_number + 1))
     output_line=$line
-    if [[ ! "$line" =~ ^[[:space:]]*$ ]] && [[ "$line" != \#* ]]; then
-      path=${line%%[[:space:]]*}
-      if [ "$path" = "$target" ]; then
-        if [ "$operation" = delete ]; then
-          if [ "$status" -ne 0 ]; then
-            break
-          fi
-          continue
+    if [ "$line_number" -eq "$target_line" ]; then
+      if [ "$operation" = delete ]; then
+        if [ "$status" -ne 0 ]; then
+          break
         fi
-        output_line="$target $command"
+        continue
       fi
+      output_line="$target $command"
     fi
     if [ "$status" -eq 0 ]; then
-      printf '%s\n' "$output_line" >> "$CMDABC_WRITE_TEMP" \
-        || { cmdabc_error "cannot write temporary library"; return 2; }
+      printf '%s\n' "$output_line" >> "$CMDABC_WRITE_TEMP" 2>/dev/null \
+        || { cmdabc_error "$failure_reason"; cmdabc_abort_write; return 2; }
     else
-      printf '%s' "$output_line" >> "$CMDABC_WRITE_TEMP" \
-        || { cmdabc_error "cannot write temporary library"; return 2; }
+      printf '%s' "$output_line" >> "$CMDABC_WRITE_TEMP" 2>/dev/null \
+        || { cmdabc_error "$failure_reason"; cmdabc_abort_write; return 2; }
       break
     fi
-  done < "$library"
-  cmdabc_commit_write_temp "$library" || return $?
-  case "$operation" in
-    update) printf 'Updated: %s\n' "$target" ;;
-    delete) printf 'Deleted: %s\n' "$target" ;;
-  esac
+  done < "$library" 2>/dev/null; then
+    cmdabc_error "$failure_reason"
+    cmdabc_abort_write
+    return 2
+  fi
+  cmdabc_commit_write_temp "$library" "$failure_reason" || return $?
+  if [ "$suppress_success" -eq 0 ]; then
+    case "$operation" in
+      update) printf '[updated: /%s]\n' "$target" ;;
+      delete) printf '[deleted: /%s]\n' "$target" ;;
+    esac
+  fi
 }
 
 cmdabc_manage_list() {
   local library=$1
-  local index line line_number match_index path command path_error
-  local valid_count=0 record_count=0 invalid_count=0
+  local index row label error
+  local valid_count=0 invalid_count=0
+  local use_color=0
 
   cmdabc_load_library "$library" tolerant || return $?
+  [ -t 1 ] && use_color=1
 
   index=0
-  while [ "$index" -lt "${#CMDABC_PATHS[@]}" ]; do
-    if [ "${CMDABC_ENTRY_VALID[$index]}" -eq 1 ]; then
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_VALID[$index]}" -eq 1 ]; then
       valid_count=$((valid_count + 1))
+    else
+      invalid_count=$((invalid_count + 1))
     fi
     index=$((index + 1))
   done
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    case "$line" in
-      \#*) continue ;;
-    esac
-    record_count=$((record_count + 1))
-  done < "$library"
-  invalid_count=$((record_count - valid_count))
-
-  if [ "$invalid_count" -eq 0 ]; then
-    printf '%s user commands\n' "$valid_count"
-  elif [ "$invalid_count" -eq 1 ]; then
-    printf '%s user commands, 1 invalid entry\n' "$valid_count"
-  else
-    printf '%s user commands, %s invalid entries\n' "$valid_count" "$invalid_count"
-  fi
-
-  line_number=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line_number=$((line_number + 1))
-    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-    case "$line" in
-      \#*) continue ;;
-    esac
-
-    match_index=-1
-    index=0
-    while [ "$index" -lt "${#CMDABC_ENTRY_LINES[@]}" ]; do
-      if [ "${CMDABC_ENTRY_LINES[$index]}" -eq "$line_number" ]; then
-        match_index=$index
-        break
-      fi
-      index=$((index + 1))
-    done
-
-    if [ "$match_index" -lt 0 ]; then
-      case "$line" in
-        *[[:space:]]*)
-          path=${line%%[[:space:]]*}
-          command=${line#"$path"}
-          command=${command#?}
-          ;;
-        *)
-          path=$line
-          command=''
-          ;;
-      esac
-      path_error=''
-      [ -n "$path" ] || path_error='malformed entry'
-      case "$path" in
-        abc|abc.*|.*|*.|*..*|*[[:space:]]*) path_error='malformed entry' ;;
-      esac
-      if [ -z "$path_error" ] && ! [[ "$command" =~ [^[:space:]] ]]; then
-        printf '%s    ???  [invalid: missing command]\n' "$path"
-      else
-        printf 'line %s    [invalid: malformed entry]\n' "$line_number"
-      fi
-    elif [ "${CMDABC_ENTRY_VALID[$match_index]}" -eq 1 ]; then
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_VALID[$index]}" -eq 1 ]; then
       printf '%s %s\n' \
-        "${CMDABC_PATHS[$match_index]}" \
-        "${CMDABC_COMMANDS[$match_index]}"
+        "${CMDABC_RECORD_PATHS[$index]}" \
+        "${CMDABC_RECORD_COMMANDS[$index]}"
     else
-      printf '%s    ???  [invalid: %s]\n' \
-        "${CMDABC_PATHS[$match_index]}" \
-        "${CMDABC_ENTRY_ERRORS[$match_index]}"
+      label=${CMDABC_RECORD_LABELS[$index]}
+      error=${CMDABC_RECORD_ERRORS[$index]}
+      cmdabc_user_reason "$error"
+      error=$CMDABC_USER_REASON
+      if [ -z "$label" ]; then
+        label="line ${CMDABC_RECORD_LINES[$index]}"
+      fi
+      row="$label  [invalid: $error]"
+      if [ "$use_color" -eq 1 ]; then
+        printf '\033[31m%s\033[0m\n' "$row"
+      else
+        printf '%s\n' "$row"
+      fi
     fi
-  done < "$library"
-}
+    index=$((index + 1))
+  done
 
-cmdabc_manage_help() {
-  cat <<'EOF'
-/abc.list
-/abc.add.<target> <command>
-/abc.update.<target> <command>
-/abc.del.<target>
-/abc.help
-
-Example: /abc.add.git.status git status
-EOF
+  if [ "${#CMDABC_RECORD_PATHS[@]}" -gt 0 ]; then
+    printf '\n'
+  fi
+  if [ "$invalid_count" -gt 0 ] && [ "$use_color" -eq 1 ]; then
+    printf '\033[31m%s commands, %s invalid\033[0m\n' "$valid_count" "$invalid_count"
+  else
+    printf '%s commands, %s invalid\n' "$valid_count" "$invalid_count"
+  fi
 }
 
 cmdabc_manage() {
-  local input remainder target command
-
   cmdabc_parse_args "$@" || return $?
   [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "manage requires --library"; return 2; }
   [ -n "$CMDABC_INPUT_ARG" ] || { cmdabc_error "manage requires --input"; return 2; }
-  input=$CMDABC_INPUT_ARG
 
-  case "$input" in
-    /abc.list)
-      cmdabc_manage_list "$CMDABC_LIBRARY_ARG"
-      ;;
-    /abc.help)
-      cmdabc_manage_help
-      ;;
-    /abc.add.*)
-      remainder=${input#/abc.add.}
-      case "$remainder" in
-        *[[:space:]]*) ;;
-        *) cmdabc_error "usage: /abc.add.<target> <command>"; return 2 ;;
-      esac
-      target=${remainder%%[[:space:]]*}
-      command=${remainder#"$target"}
-      command=${command#?}
-      cmdabc_manage_add "$CMDABC_LIBRARY_ARG" "$target" "$command"
-      ;;
-    /abc.update.*)
-      remainder=${input#/abc.update.}
-      case "$remainder" in
-        *[[:space:]]*) ;;
-        *) cmdabc_error "usage: /abc.update.<target> <command>"; return 2 ;;
-      esac
-      target=${remainder%%[[:space:]]*}
-      command=${remainder#"$target"}
-      command=${command#?}
-      cmdabc_rewrite_target update "$CMDABC_LIBRARY_ARG" "$target" "$command"
-      ;;
-    /abc.del.*)
-      target=${input#/abc.del.}
-      case "$target" in
-        ''|*[[:space:]]*) cmdabc_error "usage: /abc.del.<target>"; return 2 ;;
-      esac
-      cmdabc_rewrite_target delete "$CMDABC_LIBRARY_ARG" "$target"
-      ;;
-    *)
-      cmdabc_error "unknown management command: $input"
-      return 2
-      ;;
-  esac
+  cmdabc_print_invalid 'malformed entry'
+  return 2
+}
+
+cmdabc_internal_list() {
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] \
+    || { cmdabc_error "internal-list requires --library"; return 2; }
+  cmdabc_manage_list "$CMDABC_LIBRARY_ARG"
 }
 
 CMDABC_TTY_ACTIVE=0
@@ -640,6 +737,812 @@ cmdabc_tty_cleanup() {
     printf '\033[?25h\033[?1049l' >&4
     CMDABC_TTY_ACTIVE=0
   fi
+}
+
+cmdabc_tty_open() {
+  exec 3</dev/tty 4>/dev/tty \
+    || { cmdabc_error "interactive mode requires a controlling terminal"; return 4; }
+  trap 'cmdabc_tty_cleanup; exit 130' INT TERM HUP
+  trap 'cmdabc_tty_cleanup' EXIT
+  CMDABC_TTY_ACTIVE=1
+  printf '\033[?1049h\033[?25l' >&4
+}
+
+cmdabc_render_add() {
+  local stage=$1
+  local name=$2
+  local command=$3
+  local cursor=$4
+  local error_kind=$5
+  local error=$6
+  local column
+
+  # Stay inside the picker's existing alternate-screen session. Repaint the
+  # current UI state without opening or closing another full-screen context.
+  printf '\033[H\033[JAdd a command\n' >&4
+  if [ "$stage" = command ]; then
+    printf 'Type the command, then press Enter\n' >&4
+  else
+    printf 'Type a name like a.b, then press Space\n' >&4
+  fi
+  if [ -n "$error" ]; then
+    cmdabc_user_reason "$error"
+    error=$CMDABC_USER_REASON
+    case "$error_kind" in
+      error) printf '\033[31m[error: %s]\033[0m\n' "$error" >&4 ;;
+      *) printf '\033[31m[invalid: %s]\033[0m\n' "$error" >&4 ;;
+    esac
+  else
+    printf '\n' >&4
+  fi
+  if [ "$stage" = command ]; then
+    printf '/%s %s\n\nEnter add   Esc back' "$name" "$command" >&4
+    column=$((${#name} + cursor + 3))
+  else
+    printf '/%s\n\nSpace next   Esc back' "$name" >&4
+    column=$((cursor + 2))
+  fi
+  printf '\033[4;%sH\033[?25h' "$column" >&4
+}
+
+cmdabc_read_bracketed_paste() {
+  local key status sequence part count
+
+  CMDABC_PASTE_TEXT=''
+  CMDABC_PASTE_MULTILINE=0
+  CMDABC_PASTE_CONTROL=0
+  while :; do
+    key=''
+    if cmdabc_read_tty_byte; then
+      key=$CMDABC_TTY_BYTE
+    else
+      CMDABC_PASTE_CONTROL=1
+      return 1
+    fi
+    if [ -z "$key" ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
+      CMDABC_PASTE_MULTILINE=1
+      continue
+    fi
+    if [ "$key" = $'\033' ]; then
+      sequence=''
+      count=0
+      while [ "$count" -lt 5 ]; do
+        part=''
+        if cmdabc_read_tty_byte; then
+          part=$CMDABC_TTY_BYTE
+        else
+          CMDABC_PASTE_CONTROL=1
+          return 1
+        fi
+        if [ -z "$part" ]; then
+          CMDABC_PASTE_MULTILINE=1
+        else
+          sequence=$sequence$part
+        fi
+        count=$((count + 1))
+      done
+      if [ "$sequence" = '[201~' ]; then
+        return 0
+      fi
+      CMDABC_PASTE_CONTROL=1
+      continue
+    fi
+    CMDABC_PASTE_TEXT=$CMDABC_PASTE_TEXT$key
+  done
+}
+
+cmdabc_check_add_name() {
+  local library=$1
+  local target=$2
+
+  CMDABC_INVALID_REASON=''
+  cmdabc_validate_user_target "$target" || {
+    if [ -n "$target" ] && [ "$CMDABC_TARGET_ERROR" = 'invalid target' ]; then
+      CMDABC_INVALID_REASON='name needs a dot'
+    else
+      CMDABC_INVALID_REASON=$CMDABC_TARGET_ERROR
+    fi
+    return 2
+  }
+  cmdabc_load_library "$library" tolerant || return $?
+  cmdabc_check_new_target "$target"
+}
+
+# Runs inside the current alternate-screen TTY session. Return 0 after a
+# successful append, or 10 when Esc asks the caller to return/cancel.
+cmdabc_add_editor() {
+  local library=$1
+  local stage=name name='' command='' cursor=0 error_kind='' error='' key='' status
+  local before after paste_name paste_command
+
+  while :; do
+    cmdabc_render_add "$stage" "$name" "$command" "$cursor" "$error_kind" "$error"
+    key=''
+    if cmdabc_read_tty_byte; then
+      key=$CMDABC_TTY_BYTE
+    else
+      CMDABC_ADD_FAILURE_MESSAGE='[error: terminal input failed]'
+      return 11
+    fi
+
+    case "$key" in
+      ''|$'\r'|$'\n')
+        if [ "$stage" = name ]; then
+          error_kind=invalid
+          error='press Space to continue'
+          cursor=${#name}
+          continue
+        fi
+        CMDABC_ERROR_REASON=''
+        CMDABC_DEFER_ERRORS=1
+        if cmdabc_add_record "$library" "$name" "$command"; then
+          CMDABC_DEFER_ERRORS=0
+          CMDABC_ADD_RESULT_TARGET=$name
+          return 0
+        else
+          status=$?
+        fi
+        CMDABC_DEFER_ERRORS=0
+        if [ -n "$CMDABC_INVALID_REASON" ]; then
+          error_kind=invalid
+          error=$CMDABC_INVALID_REASON
+        else
+          error_kind=error
+          error=${CMDABC_ERROR_REASON:-failed to update command library}
+        fi
+        cursor=${#command}
+        ;;
+      ' ')
+        if [ "$stage" = command ]; then
+          before=${command:0:$cursor}
+          after=${command:$cursor}
+          command=$before$key$after
+          cursor=$((cursor + 1))
+          error_kind=''
+          error=''
+          continue
+        fi
+        CMDABC_ERROR_REASON=''
+        CMDABC_DEFER_ERRORS=1
+        if cmdabc_check_add_name "$library" "$name"; then
+          status=0
+        else
+          status=$?
+        fi
+        CMDABC_DEFER_ERRORS=0
+        if [ "$status" -eq 0 ]; then
+          stage=command
+          cursor=0
+          error_kind=''
+          error=''
+        elif [ -n "$CMDABC_INVALID_REASON" ]; then
+          error_kind=invalid
+          error=$CMDABC_INVALID_REASON
+          cursor=${#name}
+        else
+          error_kind=error
+          error=${CMDABC_ERROR_REASON:-command library is not readable}
+          cursor=${#name}
+        fi
+        ;;
+      $'\177'|$'\010')
+        if [ "$stage" = command ]; then
+          if [ -z "$command" ]; then
+            stage=name
+            cursor=${#name}
+          elif [ "$cursor" -gt 0 ]; then
+            before=${command:0:$((cursor - 1))}
+            after=${command:$cursor}
+            command=$before$after
+            cursor=$((cursor - 1))
+          fi
+        elif [ "$cursor" -gt 0 ]; then
+          before=${name:0:$((cursor - 1))}
+          after=${name:$cursor}
+          name=$before$after
+          cursor=$((cursor - 1))
+        fi
+        error_kind=''
+        error=''
+        ;;
+      $'\025')
+        if [ "$stage" = command ]; then
+          command=''
+        else
+          name=''
+        fi
+        cursor=0
+        error_kind=''
+        error=''
+        ;;
+      $'\033')
+        if ! cmdabc_read_escape_sequence; then
+          return 10
+        fi
+        case "$CMDABC_ESCAPE_SEQUENCE" in
+          '[C')
+            if [ "$stage" = command ]; then
+              [ "$cursor" -ge "${#command}" ] || cursor=$((cursor + 1))
+            else
+              [ "$cursor" -ge "${#name}" ] || cursor=$((cursor + 1))
+            fi
+            ;;
+          '[D')
+            [ "$cursor" -le 0 ] || cursor=$((cursor - 1))
+            ;;
+          '[H') cursor=0 ;;
+          '[F')
+            if [ "$stage" = command ]; then
+              cursor=${#command}
+            else
+              cursor=${#name}
+            fi
+            ;;
+          '[200~')
+            cmdabc_read_bracketed_paste
+            if [ "$CMDABC_PASTE_MULTILINE" -eq 1 ]; then
+              error_kind=invalid
+              error='multiline input'
+            elif [ "$CMDABC_PASTE_CONTROL" -eq 1 ]; then
+              error_kind=invalid
+              error='malformed entry'
+            elif [ "$stage" = command ]; then
+              before=${command:0:$cursor}
+              after=${command:$cursor}
+              command=$before$CMDABC_PASTE_TEXT$after
+              cursor=$((cursor + ${#CMDABC_PASTE_TEXT}))
+              error_kind=''
+              error=''
+            else
+              paste_name=$CMDABC_PASTE_TEXT
+              paste_command=''
+              case "$CMDABC_PASTE_TEXT" in
+                *[[:space:]]*)
+                  paste_name=${CMDABC_PASTE_TEXT%%[[:space:]]*}
+                  paste_command=${CMDABC_PASTE_TEXT#"$paste_name"}
+                  paste_command=${paste_command#?}
+                  ;;
+              esac
+              before=${name:0:$cursor}
+              after=${name:$cursor}
+              name=$before$paste_name$after
+              cursor=$((cursor + ${#paste_name}))
+              if [ "$paste_name" != "$CMDABC_PASTE_TEXT" ]; then
+                CMDABC_ERROR_REASON=''
+                CMDABC_DEFER_ERRORS=1
+                if cmdabc_check_add_name "$library" "$name"; then
+                  status=0
+                else
+                  status=$?
+                fi
+                CMDABC_DEFER_ERRORS=0
+                if [ "$status" -eq 0 ]; then
+                  stage=command
+                  command=$paste_command
+                  cursor=${#command}
+                  error_kind=''
+                  error=''
+                elif [ -n "$CMDABC_INVALID_REASON" ]; then
+                  error_kind=invalid
+                  error=$CMDABC_INVALID_REASON
+                  cursor=${#name}
+                else
+                  error_kind=error
+                  error=${CMDABC_ERROR_REASON:-command library is not readable}
+                  cursor=${#name}
+                fi
+              else
+                error_kind=''
+                error=''
+              fi
+            fi
+            ;;
+        esac
+        ;;
+      *)
+        if [ "$stage" = command ]; then
+          before=${command:0:$cursor}
+          after=${command:$cursor}
+          command=$before$key$after
+        else
+          before=${name:0:$cursor}
+          after=${name:$cursor}
+          name=$before$key$after
+        fi
+        cursor=$((cursor + ${#key}))
+        error_kind=''
+        error=''
+        ;;
+    esac
+  done
+}
+
+cmdabc_add_interactive() {
+  local status
+
+  cmdabc_parse_args "$@" || return $?
+  [ -n "$CMDABC_LIBRARY_ARG" ] || { cmdabc_error "add requires --library"; return 2; }
+  cmdabc_tty_open || return $?
+  if cmdabc_add_editor "$CMDABC_LIBRARY_ARG"; then
+    status=0
+  else
+    status=$?
+  fi
+  cmdabc_tty_cleanup
+  trap - EXIT INT TERM HUP
+  if [ "$status" -eq 0 ]; then
+    cmdabc_print_added "$CMDABC_ADD_RESULT_TARGET"
+    return 0
+  fi
+  [ "$status" -eq 10 ] && return 0
+  if [ "$status" -eq 11 ]; then
+    printf '%s\n' "$CMDABC_ADD_FAILURE_MESSAGE" >&2
+    return 2
+  fi
+  return "$status"
+}
+
+cmdabc_print_removed() {
+  local target=$1
+  printf 'success, Removed /%s\n' "$target"
+}
+
+cmdabc_render_del() {
+  local buffer=$1
+  local cursor=$2
+  local error_kind=$3
+  local error=$4
+  local locked=$5
+  local preview=$6
+  local column
+
+  printf '\033[H\033[JDelete a command\n' >&4
+  if [ "$locked" -eq 1 ]; then
+    printf 'Check the command, then press Enter\n' >&4
+  else
+    printf 'Type a name like a.b, then press Space\n' >&4
+  fi
+  if [ -n "$error" ]; then
+    cmdabc_user_reason "$error"
+    error=$CMDABC_USER_REASON
+    case "$error_kind" in
+      error) printf '\033[31m[error: %s]\033[0m\n' "$error" >&4 ;;
+      *) printf '\033[31m[invalid: %s]\033[0m\n' "$error" >&4 ;;
+    esac
+  else
+    printf '\n' >&4
+  fi
+  printf '/%s' "$buffer" >&4
+  if [ "$locked" -eq 1 ]; then
+    printf ' \033[2m%s\033[0m' "$preview" >&4
+  fi
+  if [ "$locked" -eq 1 ]; then
+    printf '\n\nEnter delete   Backspace edit   Esc back' >&4
+  else
+    printf '\n\nSpace preview   Esc back' >&4
+  fi
+  column=$((cursor + 2))
+  printf '\033[4;%sH\033[?25h' "$column" >&4
+}
+
+cmdabc_lookup_delete_target() {
+  local library=$1
+  local target=$2
+  local index match_count=0 match_index=-1
+
+  CMDABC_INVALID_REASON=''
+  CMDABC_DEL_COMMAND=''
+  CMDABC_DEL_RAW=''
+  CMDABC_DEL_LIBRARY_SNAPSHOT=''
+  cmdabc_validate_user_target "$target" \
+    || { CMDABC_INVALID_REASON=$CMDABC_TARGET_ERROR; return 2; }
+  cmdabc_load_library "$library" tolerant || return $?
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_LOCATABLE[$index]}" -eq 1 ] \
+      && [ "${CMDABC_RECORD_PATHS[$index]}" = "$target" ]; then
+      match_count=$((match_count + 1))
+      match_index=$index
+    fi
+    index=$((index + 1))
+  done
+  if [ "$match_count" -gt 1 ]; then
+    CMDABC_INVALID_REASON='duplicate target'
+    return 3
+  fi
+  if [ "$match_count" -eq 0 ]; then
+    CMDABC_INVALID_REASON='target not found'
+    return 3
+  fi
+  if [ "${CMDABC_RECORD_VALID[$match_index]}" -ne 1 ]; then
+    CMDABC_INVALID_REASON=${CMDABC_RECORD_ERRORS[$match_index]}
+    return 2
+  fi
+  CMDABC_DEL_COMMAND=${CMDABC_RECORD_COMMANDS[$match_index]}
+  CMDABC_DEL_RAW=${CMDABC_RECORD_RAW[$match_index]}
+  cmdabc_read_file_exact CMDABC_DEL_LIBRARY_SNAPSHOT "$library" \
+    || { cmdabc_error 'command library is not readable'; return 2; }
+}
+
+cmdabc_del_editor() {
+  local library=$1
+  local buffer='' cursor=0 error_kind='' error='' key='' status
+  local locked=0 locked_target='' locked_command='' locked_raw=''
+  local locked_snapshot='' current_snapshot=''
+  local before after second third fourth fifth sixth paste_target paste_confirms
+
+  while :; do
+    cmdabc_render_del "$buffer" "$cursor" "$error_kind" "$error" \
+      "$locked" "$locked_command"
+    key=''
+    if cmdabc_read_tty_byte; then
+      key=$CMDABC_TTY_BYTE
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+      CMDABC_DEL_FAILURE_MESSAGE='[error: terminal input failed]'
+      return 11
+    fi
+
+    if [ "$locked" -eq 1 ]; then
+      case "$key" in
+        ''|$'\r'|$'\n')
+          CMDABC_ERROR_REASON=''
+          CMDABC_DEFER_ERRORS=1
+          current_snapshot=''
+          if ! cmdabc_read_file_exact current_snapshot "$library"; then
+            CMDABC_ERROR_REASON='failed to remove target'
+            status=2
+          elif [ "$current_snapshot" != "$locked_snapshot" ]; then
+            CMDABC_ERROR_REASON='command library changed, retry'
+            status=4
+          elif cmdabc_rewrite_target delete "$library" "$locked_target" '' "$locked_raw" 1 1; then
+            status=0
+          else
+            status=$?
+          fi
+          CMDABC_DEFER_ERRORS=0
+          if [ "$status" -eq 0 ]; then
+            CMDABC_DEL_RESULT_TARGET=$locked_target
+            return 0
+          fi
+          if [ "$CMDABC_ERROR_REASON" = 'command library changed, retry' ]; then
+            error_kind=error
+            error=$CMDABC_ERROR_REASON
+            locked=0
+            locked_target=''
+            locked_command=''
+            locked_raw=''
+            locked_snapshot=''
+            cursor=${#buffer}
+            continue
+          fi
+          CMDABC_DEL_FAILURE_MESSAGE="[error: failed to remove /$locked_target]"
+          return 11
+          ;;
+        $'\177'|$'\010')
+          locked=0
+          locked_target=''
+          locked_command=''
+          locked_raw=''
+          locked_snapshot=''
+          error_kind=''
+          error=''
+          cursor=${#buffer}
+          ;;
+        $'\033')
+          if ! cmdabc_read_escape_sequence; then
+            return 10
+          fi
+          if [ "$CMDABC_ESCAPE_SEQUENCE" = '[200~' ]; then
+            cmdabc_read_bracketed_paste
+          fi
+          ;;
+        *) ;;
+      esac
+      continue
+    fi
+
+    case "$key" in
+      ''|$'\r'|$'\n')
+        error_kind=invalid
+        error='press Space to confirm target'
+        cursor=${#buffer}
+        ;;
+      ' ')
+        CMDABC_ERROR_REASON=''
+        CMDABC_DEFER_ERRORS=1
+        if cmdabc_lookup_delete_target "$library" "$buffer"; then
+          status=0
+        else
+          status=$?
+        fi
+        CMDABC_DEFER_ERRORS=0
+        if [ "$status" -eq 0 ]; then
+          locked=1
+          locked_target=$buffer
+          locked_command=$CMDABC_DEL_COMMAND
+          locked_raw=$CMDABC_DEL_RAW
+          locked_snapshot=$CMDABC_DEL_LIBRARY_SNAPSHOT
+          error_kind=''
+          error=''
+        elif [ -n "$CMDABC_INVALID_REASON" ]; then
+          error_kind=invalid
+          error=$CMDABC_INVALID_REASON
+        else
+          error_kind=error
+          error=${CMDABC_ERROR_REASON:-command library is not readable}
+        fi
+        cursor=${#buffer}
+        ;;
+      $'\177'|$'\010')
+        if [ "$cursor" -gt 0 ]; then
+          before=${buffer:0:$((cursor - 1))}
+          after=${buffer:$cursor}
+          buffer=$before$after
+          cursor=$((cursor - 1))
+        fi
+        error_kind=''
+        error=''
+        ;;
+      $'\025')
+        buffer=''
+        cursor=0
+        error_kind=''
+        error=''
+        ;;
+      $'\033')
+        if ! cmdabc_read_escape_sequence; then
+          return 10
+        fi
+        case "$CMDABC_ESCAPE_SEQUENCE" in
+          '[C')
+            [ "$cursor" -ge "${#buffer}" ] || cursor=$((cursor + 1))
+            ;;
+          '[D')
+            [ "$cursor" -le 0 ] || cursor=$((cursor - 1))
+            ;;
+          '[H') cursor=0 ;;
+          '[F') cursor=${#buffer} ;;
+          '[200~')
+            cmdabc_read_bracketed_paste
+            if [ "$CMDABC_PASTE_MULTILINE" -eq 1 ]; then
+                error_kind=invalid
+                error='multiline input'
+            elif [ "$CMDABC_PASTE_CONTROL" -eq 1 ]; then
+                error_kind=invalid
+                error='malformed entry'
+            else
+                paste_target=''
+                paste_confirms=0
+                case "$CMDABC_PASTE_TEXT" in
+                  *[[:space:]]*)
+                    paste_target=${CMDABC_PASTE_TEXT%%[[:space:]]*}
+                    paste_confirms=1
+                    ;;
+                esac
+                if [ "$paste_confirms" -eq 1 ]; then
+                  before=${buffer:0:$cursor}
+                  after=${buffer:$cursor}
+                  buffer=$before$paste_target$after
+                  cursor=$((cursor + ${#paste_target}))
+                  CMDABC_ERROR_REASON=''
+                  CMDABC_DEFER_ERRORS=1
+                  if cmdabc_lookup_delete_target "$library" "$buffer"; then
+                    status=0
+                  else
+                    status=$?
+                  fi
+                  CMDABC_DEFER_ERRORS=0
+                  if [ "$status" -eq 0 ]; then
+                    locked=1
+                    locked_target=$buffer
+                    locked_command=$CMDABC_DEL_COMMAND
+                    locked_raw=$CMDABC_DEL_RAW
+                    locked_snapshot=$CMDABC_DEL_LIBRARY_SNAPSHOT
+                    error_kind=''
+                    error=''
+                  elif [ -n "$CMDABC_INVALID_REASON" ]; then
+                    error_kind=invalid
+                    error=$CMDABC_INVALID_REASON
+                  else
+                    error_kind=error
+                    error=${CMDABC_ERROR_REASON:-command library is not readable}
+                  fi
+                else
+                  before=${buffer:0:$cursor}
+                  after=${buffer:$cursor}
+                  buffer=$before$CMDABC_PASTE_TEXT$after
+                  cursor=$((cursor + ${#CMDABC_PASTE_TEXT}))
+                  error_kind=''
+                  error=''
+                fi
+            fi
+            ;;
+        esac
+        ;;
+      *)
+        before=${buffer:0:$cursor}
+        after=${buffer:$cursor}
+        buffer=$before$key$after
+        cursor=$((cursor + ${#key}))
+        error_kind=''
+        error=''
+        ;;
+    esac
+  done
+}
+
+cmdabc_list_display_path() {
+  CMDABC_LIST_DISPLAY_PATH='~/.cmdabc-data/command-library.txt'
+}
+
+cmdabc_list_add_row() {
+  local text=$1
+  local style=$2
+  local index=${#CMDABC_LIST_ROWS[@]}
+
+  CMDABC_LIST_ROWS[$index]=$text
+  CMDABC_LIST_STYLES[$index]=$style
+}
+
+cmdabc_build_list_rows() {
+  local library=$1
+  local index label error command row padding width
+  local valid_count=0 invalid_count=0 max_label=0
+
+  cmdabc_load_library "$library" tolerant || return $?
+  cmdabc_list_display_path "$library"
+  CMDABC_LIST_ROWS=()
+  CMDABC_LIST_STYLES=()
+
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    if [ "${CMDABC_RECORD_VALID[$index]}" -eq 1 ]; then
+      valid_count=$((valid_count + 1))
+      label=${CMDABC_RECORD_PATHS[$index]}
+    else
+      invalid_count=$((invalid_count + 1))
+      label=${CMDABC_RECORD_LABELS[$index]}
+      [ -n "$label" ] || label="line ${CMDABC_RECORD_LINES[$index]}"
+    fi
+    [ "${#label}" -le "$max_label" ] || max_label=${#label}
+    index=$((index + 1))
+  done
+
+  index=0
+  while [ "$index" -lt "${#CMDABC_RECORD_PATHS[@]}" ]; do
+    label=${CMDABC_RECORD_LABELS[$index]}
+    [ -n "$label" ] || label="line ${CMDABC_RECORD_LINES[$index]}"
+    padding=''
+    width=$((${#label}))
+    while [ "$width" -lt "$max_label" ]; do
+      padding=$padding' '
+      width=$((width + 1))
+    done
+    if [ "${CMDABC_RECORD_VALID[$index]}" -eq 1 ]; then
+      command=${CMDABC_RECORD_COMMANDS[$index]}
+      row="$label$padding  $command"
+      cmdabc_list_add_row "$row" normal
+    else
+      error=${CMDABC_RECORD_ERRORS[$index]}
+      cmdabc_user_reason "$error"
+      error=$CMDABC_USER_REASON
+      row="$label$padding  [invalid: $error]"
+      cmdabc_list_add_row "$row" invalid
+    fi
+    index=$((index + 1))
+  done
+
+  CMDABC_LIST_VALID_COUNT=$valid_count
+  CMDABC_LIST_INVALID_COUNT=$invalid_count
+}
+
+cmdabc_truncate_list_text() {
+  local text=$1
+  local width=$2
+
+  CMDABC_LIST_RENDER_TEXT=$text
+  if [ "${#CMDABC_LIST_RENDER_TEXT}" -gt "$width" ]; then
+    if [ "$width" -gt 1 ]; then
+      CMDABC_LIST_RENDER_TEXT=${CMDABC_LIST_RENDER_TEXT:0:$((width - 1))}'…'
+    else
+      CMDABC_LIST_RENDER_TEXT=${CMDABC_LIST_RENDER_TEXT:0:1}
+    fi
+  fi
+}
+
+cmdabc_render_list() {
+  local offset=$1
+  local columns lines content_width capacity index end style
+
+  columns=${COLUMNS:-80}
+  case "$columns" in
+    ''|*[!0-9]*|0) columns=80 ;;
+  esac
+  lines=${LINES:-24}
+  case "$lines" in
+    ''|*[!0-9]*|0) lines=24 ;;
+  esac
+  [ "$lines" -ge 8 ] || lines=8
+  content_width=$((10#$columns - 1))
+  [ "$content_width" -ge 1 ] || content_width=1
+  capacity=$((10#$lines - 6))
+  [ "$capacity" -ge 1 ] || capacity=1
+  end=$((offset + capacity))
+
+  cmdabc_truncate_list_text "$CMDABC_LIST_DISPLAY_PATH" "$content_width"
+  printf '\033[H\033[2JCommands\n\033[2m%s\033[0m\n\n' \
+    "$CMDABC_LIST_RENDER_TEXT" >&4
+  index=$offset
+  while [ "$index" -lt "$end" ] && [ "$index" -lt "${#CMDABC_LIST_ROWS[@]}" ]; do
+    cmdabc_truncate_list_text "${CMDABC_LIST_ROWS[$index]}" "$content_width"
+    style=${CMDABC_LIST_STYLES[$index]}
+    case "$style" in
+      invalid) printf '\033[31m%s\033[0m\n' "$CMDABC_LIST_RENDER_TEXT" >&4 ;;
+      *) printf '%s\n' "$CMDABC_LIST_RENDER_TEXT" >&4 ;;
+    esac
+    index=$((index + 1))
+  done
+  printf '\033[%s;1H%s valid   ' "$((lines - 2))" "$CMDABC_LIST_VALID_COUNT" >&4
+  if [ "$CMDABC_LIST_INVALID_COUNT" -gt 0 ]; then
+    printf '\033[31m%s invalid\033[0m' "$CMDABC_LIST_INVALID_COUNT" >&4
+  else
+    printf '%s invalid' "$CMDABC_LIST_INVALID_COUNT" >&4
+  fi
+  printf '\033[%s;1H↑/↓ scroll   Esc back' "$lines" >&4
+}
+
+cmdabc_list_editor() {
+  local library=$1
+  local offset=0 key='' status lines capacity max_offset
+
+  CMDABC_ERROR_REASON=''
+  CMDABC_DEFER_ERRORS=1
+  if cmdabc_build_list_rows "$library"; then
+    status=0
+  else
+    status=$?
+  fi
+  CMDABC_DEFER_ERRORS=0
+  if [ "$status" -ne 0 ]; then
+    CMDABC_LIST_FAILURE_MESSAGE="[error: ${CMDABC_ERROR_REASON:-command library is not readable}]"
+    return 11
+  fi
+
+  lines=${LINES:-24}
+  case "$lines" in
+    ''|*[!0-9]*|0) lines=24 ;;
+  esac
+  [ "$lines" -ge 8 ] || lines=8
+  capacity=$((10#$lines - 6))
+  [ "$capacity" -ge 1 ] || capacity=1
+  max_offset=$((${#CMDABC_LIST_ROWS[@]} - capacity))
+  [ "$max_offset" -ge 0 ] || max_offset=0
+
+  while :; do
+    cmdabc_render_list "$offset"
+    key=''
+    if cmdabc_read_tty_byte; then
+      key=$CMDABC_TTY_BYTE
+    else
+      CMDABC_LIST_FAILURE_MESSAGE='[error: terminal input failed]'
+      return 11
+    fi
+    case "$key" in
+      $'\033')
+        if ! cmdabc_read_escape_sequence; then
+          return 10
+        fi
+        case "$CMDABC_ESCAPE_SEQUENCE" in
+          '[A') [ "$offset" -le 0 ] || offset=$((offset - 1)) ;;
+          '[B') [ "$offset" -ge "$max_offset" ] || offset=$((offset + 1)) ;;
+        esac
+        ;;
+    esac
+  done
 }
 
 cmdabc_append_visible_children() {
@@ -723,6 +1626,7 @@ cmdabc_render() {
   local namespace=$1
   local selected=$2
   local index marker suffix indent depth name command preview preview_sgr gap
+  local name_padding name_width
   local columns content_width row_width available preview_chars
 
   columns=${COLUMNS:-80}
@@ -754,17 +1658,29 @@ cmdabc_render() {
       fi
     fi
     name=${CMDABC_VISIBLE_NAMES[$index]}
-    printf '%s%s%s%s' "$indent" "$marker" "$name" "$suffix" >&4
+    name_padding=''
+    if [ "$namespace" = abc ] && [ "${CMDABC_VISIBLE_TYPES[$index]}" = leaf ]; then
+      name_width=${#name}
+      while [ "$name_width" -lt 4 ]; do
+        name_padding=$name_padding' '
+        name_width=$((name_width + 1))
+      done
+    fi
+    printf '%s%s%s%s%s' "$indent" "$marker" "$name" "$suffix" "$name_padding" >&4
     if [ "${CMDABC_VISIBLE_TYPES[$index]}" = "leaf" ]; then
       if [ "${CMDABC_VISIBLE_VALID[$index]}" -eq 1 ]; then
         command=${CMDABC_VISIBLE_COMMANDS[$index]}
         preview=$command
-        preview_sgr='2;3'
+        if [ "$namespace" = abc ]; then
+          preview_sgr='2'
+        else
+          preview_sgr='2;3'
+        fi
       else
         preview='???'
         preview_sgr='2'
       fi
-      row_width=$((${#indent} + ${#marker} + ${#name} + ${#suffix}))
+      row_width=$((${#indent} + ${#marker} + ${#name} + ${#suffix} + ${#name_padding}))
       available=$((content_width - row_width - ${#gap}))
       if [ "$available" -ge 8 ]; then
         if [ "${#preview}" -gt "$available" ]; then
@@ -780,12 +1696,30 @@ cmdabc_render() {
   printf '\n↑/↓ select   Enter/Right open   Left back   Esc cancel' >&4
 }
 
+CMDABC_INPUT_QUEUE=''
+CMDABC_ESCAPE_DSR_PENDING=0
+
+cmdabc_read_tty_byte() {
+  local __cmdabc_byte
+
+  if [ -n "$CMDABC_INPUT_QUEUE" ]; then
+    CMDABC_TTY_BYTE=${CMDABC_INPUT_QUEUE:0:1}
+    CMDABC_INPUT_QUEUE=${CMDABC_INPUT_QUEUE:1}
+    return 0
+  fi
+  __cmdabc_byte=''
+  IFS= read -r -s -n 1 __cmdabc_byte <&3
+  CMDABC_TTY_BYTE=$__cmdabc_byte
+}
+
 cmdabc_read_escape_byte() {
   local __cmdabc_byte
 
-  # Bash 3.2 does not accept fractional `read -t` values. It is only used as
-  # the picker launcher on macOS, so it gets a conservative one-second timeout.
-  # Target Bash 5.2 uses the short timeout.
+  if [ -n "$CMDABC_INPUT_QUEUE" ]; then
+    CMDABC_ESCAPE_BYTE=${CMDABC_INPUT_QUEUE:0:1}
+    CMDABC_INPUT_QUEUE=${CMDABC_INPUT_QUEUE:1}
+    return 0
+  fi
   __cmdabc_byte=''
   if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
     IFS= read -r -s -n 1 -t 0.08 __cmdabc_byte <&3
@@ -796,6 +1730,119 @@ cmdabc_read_escape_byte() {
   [ -n "$CMDABC_ESCAPE_BYTE" ]
 }
 
+cmdabc_drain_cursor_report() {
+  local initial_escape=${1:-0}
+  local state=normal candidate='' queued='' key='' status has_separator=0
+
+  if [ "$initial_escape" -eq 1 ]; then
+    state=escape
+    candidate=$'\033'
+  fi
+  while :; do
+    key=''
+    IFS= read -r -s -n 1 -t 1 key <&3
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      CMDABC_INPUT_QUEUE=$CMDABC_INPUT_QUEUE$queued$candidate
+      CMDABC_ESCAPE_DSR_PENDING=0
+      return 1
+    fi
+    [ -n "$key" ] || key=$'\n'
+    case "$state" in
+      normal)
+        if [ "$key" = $'\033' ]; then
+          state=escape
+          candidate=$'\033'
+        else
+          queued=$queued$key
+        fi
+        ;;
+      escape)
+        if [ "$key" = '[' ]; then
+          state=report
+          candidate=$candidate$key
+          has_separator=0
+        else
+          queued=$queued$candidate$key
+          state=normal
+          candidate=''
+        fi
+        ;;
+      report)
+        case "$key" in
+          [0-9]) candidate=$candidate$key ;;
+          ';') candidate=$candidate$key; has_separator=1 ;;
+          R)
+            if [ "$has_separator" -eq 1 ]; then
+              CMDABC_INPUT_QUEUE=$CMDABC_INPUT_QUEUE$queued
+              CMDABC_ESCAPE_DSR_PENDING=0
+              return 0
+            fi
+            queued=$queued$candidate$key
+            state=normal
+            candidate=''
+            ;;
+          $'\033')
+            queued=$queued$candidate
+            state=escape
+            candidate=$'\033'
+            ;;
+          *)
+            queued=$queued$candidate$key
+            state=normal
+            candidate=''
+            ;;
+        esac
+        ;;
+    esac
+  done
+}
+
+cmdabc_read_escape_sequence() {
+  local first second fourth fifth sixth
+
+  CMDABC_ESCAPE_SEQUENCE=''
+  CMDABC_ESCAPE_DSR_PENDING=0
+  if [ -n "$CMDABC_INPUT_QUEUE" ]; then
+    cmdabc_read_escape_byte || return 1
+  elif [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+    cmdabc_read_escape_byte || return 1
+  else
+    # Bash 3.2 cannot express a sub-second read timeout. A cursor-position
+    # query produces an immediate ESC[row;colR sentinel for a standalone Esc;
+    # queued arrow/paste suffix bytes still arrive before that response.
+    printf '\033[6n' >&4
+    CMDABC_ESCAPE_DSR_PENDING=1
+    cmdabc_read_escape_byte || { CMDABC_ESCAPE_DSR_PENDING=0; return 1; }
+    if [ "$CMDABC_ESCAPE_BYTE" = $'\033' ]; then
+      cmdabc_drain_cursor_report 1
+      return 1
+    fi
+  fi
+
+  first=$CMDABC_ESCAPE_BYTE
+  CMDABC_ESCAPE_SEQUENCE=$first
+  if [ "$first" = '[' ]; then
+    if cmdabc_read_escape_byte; then
+      second=$CMDABC_ESCAPE_BYTE
+      CMDABC_ESCAPE_SEQUENCE=$CMDABC_ESCAPE_SEQUENCE$second
+      if [ "$second" = 2 ]; then
+        fourth=''
+        fifth=''
+        sixth=''
+        if cmdabc_read_escape_byte; then fourth=$CMDABC_ESCAPE_BYTE; fi
+        if cmdabc_read_escape_byte; then fifth=$CMDABC_ESCAPE_BYTE; fi
+        if cmdabc_read_escape_byte; then sixth=$CMDABC_ESCAPE_BYTE; fi
+        CMDABC_ESCAPE_SEQUENCE=$CMDABC_ESCAPE_SEQUENCE$fourth$fifth$sixth
+      fi
+    fi
+  fi
+  if [ "$CMDABC_ESCAPE_DSR_PENDING" -eq 1 ]; then
+    cmdabc_drain_cursor_report 0 || :
+  fi
+  return 0
+}
+
 cmdabc_finish_leaf_selection() {
   local selected=$1
 
@@ -804,15 +1851,23 @@ cmdabc_finish_leaf_selection() {
   if [ "${CMDABC_VISIBLE_VALID[$selected]}" -ne 1 ]; then
     # Status 5 tells the shell widget to clear its editor buffer and present
     # this captured message on a fresh line.
-    printf 'CmdABC: invalid command entry\n'
-    printf '  line %s: %s\n' \
-      "${CMDABC_VISIBLE_LINES[$selected]}" \
-      "${CMDABC_VISIBLE_RAW[$selected]}"
-    printf '  expected: <namespace.path> <command>\n'
+    cmdabc_user_reason "${CMDABC_VISIBLE_ERRORS[$selected]}"
+    printf '[invalid: %s]\n' "$CMDABC_USER_REASON"
     return 5
   fi
   printf '%s\n' "${CMDABC_VISIBLE_COMMANDS[$selected]}"
   return 0
+}
+
+cmdabc_reload_picker_library() {
+  local namespace=$1
+  local library=$2
+
+  if [ "$namespace" = abc ]; then
+    cmdabc_load_system_library
+  else
+    cmdabc_load_library "$library" tolerant
+  fi
 }
 
 cmdabc_pick() {
@@ -824,7 +1879,7 @@ cmdabc_pick() {
   [ -n "$CMDABC_NAMESPACE_ARG" ] || { cmdabc_error "pick requires --namespace"; return 2; }
   namespace=$CMDABC_NAMESPACE_ARG
   case "$namespace" in
-    *[!A-Za-z0-9_-]*) cmdabc_error "invalid namespace: $namespace"; return 2 ;;
+    *[!A-Za-z0-9_-]*) cmdabc_print_invalid 'invalid target'; return 2 ;;
   esac
 
   if [ "$namespace" = abc ]; then
@@ -833,13 +1888,10 @@ cmdabc_pick() {
     cmdabc_load_library "$CMDABC_LIBRARY_ARG" tolerant || return $?
   fi
   cmdabc_build_children "$namespace"
-  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] || { cmdabc_error "namespace not found: $namespace"; return 3; }
+  [ "${#CMDABC_CHILD_NAMES[@]}" -gt 0 ] \
+    || { cmdabc_print_invalid 'target not found'; return 3; }
 
-  exec 3</dev/tty 4>/dev/tty || { cmdabc_error "pick requires a controlling terminal"; return 4; }
-  trap 'cmdabc_tty_cleanup; exit 130' INT TERM HUP
-  trap 'cmdabc_tty_cleanup' EXIT
-  CMDABC_TTY_ACTIVE=1
-  printf '\033[?1049h\033[?25l' >&4
+  cmdabc_tty_open || return $?
 
   expanded_path=''
   selected_path=''
@@ -848,7 +1900,7 @@ cmdabc_pick() {
     if [ "${#CMDABC_VISIBLE_NAMES[@]}" -eq 0 ]; then
       cmdabc_tty_cleanup
       trap - EXIT INT TERM HUP
-      cmdabc_error "namespace has no children: $namespace"
+      cmdabc_print_invalid 'target not found'
       return 3
     fi
     if [ -n "$selected_path" ] && cmdabc_find_visible_index "$selected_path"; then
@@ -860,9 +1912,14 @@ cmdabc_pick() {
     cmdabc_render "$namespace" "$selected"
 
     key=''
-    IFS= read -r -s -n 1 key <&3
-    status=$?
-    [ "$status" -eq 0 ] || continue
+    if cmdabc_read_tty_byte; then
+      key=$CMDABC_TTY_BYTE
+    else
+      cmdabc_tty_cleanup
+      trap - EXIT INT TERM HUP
+      cmdabc_error 'terminal input failed'
+      return 4
+    fi
 
     case "$key" in
       ''|$'\r'|$'\n')
@@ -872,49 +1929,167 @@ cmdabc_pick() {
           cmdabc_build_children "$path"
           expanded_path=$path
           selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
+        elif [ "$path" = 'abc.add' ]; then
+          if cmdabc_add_editor "$CMDABC_LIBRARY_ARG"; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            cmdabc_print_added "$CMDABC_ADD_RESULT_TARGET"
+            return 6
+          else
+            status=$?
+          fi
+          if [ "$status" -ne 10 ]; then
+            if [ "$status" -eq 11 ]; then
+              cmdabc_tty_cleanup
+              trap - EXIT INT TERM HUP
+              printf '%s\n' "$CMDABC_ADD_FAILURE_MESSAGE"
+              return 6
+            fi
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            return "$status"
+          fi
+          cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+          printf '\033[?25l' >&4
+        elif [ "$path" = 'abc.del' ]; then
+          if cmdabc_del_editor "$CMDABC_LIBRARY_ARG"; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            cmdabc_print_removed "$CMDABC_DEL_RESULT_TARGET"
+            return 6
+          else
+            status=$?
+          fi
+          if [ "$status" -eq 11 ]; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            printf '%s\n' "$CMDABC_DEL_FAILURE_MESSAGE"
+            return 6
+          fi
+          if [ "$status" -ne 10 ]; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            return "$status"
+          fi
+          cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+          printf '\033[?25l' >&4
+        elif [ "$path" = 'abc.list' ]; then
+          if cmdabc_list_editor "$CMDABC_LIBRARY_ARG"; then
+            status=0
+          else
+            status=$?
+          fi
+          if [ "$status" -eq 11 ]; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            printf '%s\n' "$CMDABC_LIST_FAILURE_MESSAGE"
+            return 6
+          fi
+          if [ "$status" -ne 10 ]; then
+            cmdabc_tty_cleanup
+            trap - EXIT INT TERM HUP
+            return "$status"
+          fi
+          cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+          printf '\033[?25l' >&4
         else
           cmdabc_finish_leaf_selection "$selected"
           return $?
         fi
         ;;
       $'\033')
-        second=''
-        if ! cmdabc_read_escape_byte; then
+        if ! cmdabc_read_escape_sequence; then
           cmdabc_tty_cleanup
           trap - EXIT INT TERM HUP
           return 130
         fi
-        second=$CMDABC_ESCAPE_BYTE
-        if [ "$second" != '[' ]; then
-          continue
-        fi
-        third=''
-        cmdabc_read_escape_byte || continue
-        third=$CMDABC_ESCAPE_BYTE
-        case "$third" in
-          A)
+        case "$CMDABC_ESCAPE_SEQUENCE" in
+          '[A')
             selected=$((selected - 1))
             [ "$selected" -ge 0 ] || selected=$((${#CMDABC_VISIBLE_NAMES[@]} - 1))
             selected_path=${CMDABC_VISIBLE_PATHS[$selected]}
             ;;
-          B)
+          '[B')
             selected=$((selected + 1))
             [ "$selected" -lt "${#CMDABC_VISIBLE_NAMES[@]}" ] || selected=0
             selected_path=${CMDABC_VISIBLE_PATHS[$selected]}
             ;;
-          C)
+          '[C')
             type=${CMDABC_VISIBLE_TYPES[$selected]}
             path=${CMDABC_VISIBLE_PATHS[$selected]}
             if [ "$type" = "parent" ]; then
               cmdabc_build_children "$path"
               expanded_path=$path
               selected_path="$path.${CMDABC_CHILD_NAMES[0]}"
+            elif [ "$path" = 'abc.add' ]; then
+              if cmdabc_add_editor "$CMDABC_LIBRARY_ARG"; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                cmdabc_print_added "$CMDABC_ADD_RESULT_TARGET"
+                return 6
+              else
+                status=$?
+              fi
+              if [ "$status" -ne 10 ]; then
+                if [ "$status" -eq 11 ]; then
+                  cmdabc_tty_cleanup
+                  trap - EXIT INT TERM HUP
+                  printf '%s\n' "$CMDABC_ADD_FAILURE_MESSAGE"
+                  return 6
+                fi
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                return "$status"
+              fi
+              cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+              printf '\033[?25l' >&4
+            elif [ "$path" = 'abc.del' ]; then
+              if cmdabc_del_editor "$CMDABC_LIBRARY_ARG"; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                cmdabc_print_removed "$CMDABC_DEL_RESULT_TARGET"
+                return 6
+              else
+                status=$?
+              fi
+              if [ "$status" -eq 11 ]; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                printf '%s\n' "$CMDABC_DEL_FAILURE_MESSAGE"
+                return 6
+              fi
+              if [ "$status" -ne 10 ]; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                return "$status"
+              fi
+              cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+              printf '\033[?25l' >&4
+            elif [ "$path" = 'abc.list' ]; then
+              if cmdabc_list_editor "$CMDABC_LIBRARY_ARG"; then
+                status=0
+              else
+                status=$?
+              fi
+              if [ "$status" -eq 11 ]; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                printf '%s\n' "$CMDABC_LIST_FAILURE_MESSAGE"
+                return 6
+              fi
+              if [ "$status" -ne 10 ]; then
+                cmdabc_tty_cleanup
+                trap - EXIT INT TERM HUP
+                return "$status"
+              fi
+              cmdabc_reload_picker_library "$namespace" "$CMDABC_LIBRARY_ARG" || return $?
+              printf '\033[?25l' >&4
             else
               cmdabc_finish_leaf_selection "$selected"
               return $?
             fi
             ;;
-          D)
+          '[D')
             if [ "${CMDABC_VISIBLE_DEPTHS[$selected]}" -gt 0 ]; then
               path=${CMDABC_VISIBLE_PATHS[$selected]}
               parent_path=${path%.*}
@@ -949,6 +2124,10 @@ case "${1:-}" in
   manage)
     shift
     cmdabc_manage "$@"
+    ;;
+  internal-list)
+    shift
+    cmdabc_internal_list "$@"
     ;;
   --version)
     [ -n "$CMDABC_VERSION" ] || { cmdabc_error "VERSION not found"; exit 2; }

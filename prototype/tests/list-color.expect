@@ -1,0 +1,175 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+set test_home [lindex $argv 4]
+set path_text "~/.cmdabc-data/command-library.txt"
+set dim_style "\033\[2m"
+set italic_style "\033\[2;3m"
+set red_style "\033\[31m"
+set style_reset "\033\[0m"
+set channel [open $library r]
+set original_library [read $channel]
+close $channel
+log_user 0
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+proc must_transition_to_list {} {
+  expect {
+    -ex "\033\[?1049h" {
+      puts stderr "FAIL: List opened a nested alternate screen"
+      exit 1
+    }
+    -ex "\033\[?1049l" {
+      puts stderr "FAIL: picker exited before entering List"
+      exit 1
+    }
+    -ex "Commands" { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for in-place List"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited before entering List"
+      exit 1
+    }
+  }
+}
+
+proc must_reach_fixed_list_chrome {path_text valid_count invalid_count} {
+  expect {
+    -ex "\033\[2m${path_text}\033\[0m" {}
+    timeout {
+      puts stderr "FAIL: fixed List path disappeared while scrolling"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while scrolling List"
+      exit 1
+    }
+  }
+  must_expect "${valid_count} valid   \033\[31m${invalid_count} invalid\033\[0m"
+  must_expect "scroll   Esc back"
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env HOME=$test_home PS1=CMDABC_LIST_PROMPT CMDABC_LIBRARY=$library LINES=10 COLUMNS=80 $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env HOME=$test_home PS1=CMDABC_LIST_PROMPT CMDABC_LIBRARY=$library LINES=10 COLUMNS=80 $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
+
+must_expect "CMDABC_LIST_PROMPT"
+send -- "source $integration\r"
+must_expect "CMDABC_LIST_PROMPT"
+send -- "LINES=10; COLUMNS=80\r"
+must_expect "CMDABC_LIST_PROMPT"
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\033\[B\r"
+must_transition_to_list
+
+expect {
+  -ex "${italic_style}${path_text}" {
+    puts stderr "FAIL: List path used italic styling"
+    exit 1
+  }
+  -ex "${dim_style}${path_text}${style_reset}" {}
+  timeout {
+    puts stderr "FAIL: List did not show the home-relative dim path"
+    exit 1
+  }
+}
+must_expect "valid.one"
+must_expect "${red_style}bad.record"
+must_expect "\[invalid: missing command\]${style_reset}"
+must_expect "5 valid   ${red_style}3 invalid${style_reset}"
+must_expect "scroll   Esc back"
+
+# The fixed path, summary, and footer are repainted on every scroll. Only the
+# record viewport advances by one row.
+send -- "\033\[B"
+must_reach_fixed_list_chrome $path_text 5 3
+send -- "\033\[B\033\[B\033\[B\033\[B\033\[B\033\[B\033\[B\033\[B"
+must_expect "valid.four"
+must_reach_fixed_list_chrome $path_text 5 3
+
+# Esc returns to the existing management home; only the second Esc leaves the
+# original alternate-screen session.
+send -- "\033"
+expect {
+  -ex "\033\[?1049l" {
+    puts stderr "FAIL: List Esc exited the management picker"
+    exit 1
+  }
+  -ex "CmdABC  /abc." {}
+  timeout {
+    puts stderr "FAIL: List Esc did not return to management home"
+    exit 1
+  }
+}
+must_expect "> list"
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\025"
+
+# With no invalid records, the fixed summary remains uncolored.
+set channel [open $library w]
+puts $channel "clean.one echo ONE"
+puts $channel "clean.two echo TWO"
+close $channel
+send -- "/abc."
+must_expect "CmdABC  /abc."
+send -- "\033\[B\033\[B\r"
+must_transition_to_list
+expect {
+  -ex "${red_style}0 invalid" {
+    puts stderr "FAIL: zero-invalid List summary used error red"
+    exit 1
+  }
+  -ex "2 valid   0 invalid" {}
+  timeout {
+    puts stderr "FAIL: zero-invalid List summary was not visible"
+    exit 1
+  }
+}
+send -- "\033"
+must_expect "CmdABC  /abc."
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\025"
+send -- "echo LIST_RETURN_OK\r"
+must_expect "LIST_RETURN_OK"
+must_expect "CMDABC_LIST_PROMPT"
+set channel [open $library w]
+puts -nonewline $channel $original_library
+close $channel
+send -- "exit\r"
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}

@@ -61,6 +61,10 @@ proc must_reach_footer_without {forbidden} {
 # A wide terminal shows complete leaf commands, while a parent row remains
 # command-free. Selecting the nested leaf returns the original bytes only.
 spawn env COLUMNS=120 $runtime pick --library $library --namespace preview
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
 fconfigure $spawn_id -encoding binary -translation binary
 must_expect "CmdABC  /preview."
 must_expect "> tar  ${preview_style}${tar_command}${style_reset}\r\n"
@@ -80,6 +84,10 @@ set content_width [expr {$columns - 1}]
 set available [expr {$content_width - [string length "  find"] - 2}]
 set shortened [string range $find_command 0 [expr {$available - 2}]]
 spawn env COLUMNS=$columns $runtime pick --library $library --namespace preview
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
 fconfigure $spawn_id -encoding binary -translation binary
 must_expect "  find  ${preview_style}${shortened}"
 expect -ex $style_reset
@@ -96,6 +104,10 @@ must_exit_with 130
 # If fewer than eight columns remain, the preview is omitted and the picker
 # continues to accept cancellation normally.
 spawn env COLUMNS=12 $runtime pick --library $library --namespace preview
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
 fconfigure $spawn_id -encoding binary -translation binary
 must_expect "> tar\r\n"
 must_expect "  find\r\n"

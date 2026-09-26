@@ -1,0 +1,81 @@
+#!/usr/bin/expect -f
+
+set timeout 5
+set shell_kind [lindex $argv 0]
+set shell_bin [lindex $argv 1]
+set prototype_dir [lindex $argv 2]
+set library [lindex $argv 3]
+log_user 0
+
+proc must_expect {literal} {
+  expect {
+    -ex $literal { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for <$literal>"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited while waiting for <$literal>"
+      exit 1
+    }
+  }
+}
+
+if {$shell_kind eq "zsh"} {
+  spawn env PS1=CMDABC_ESC_PROMPT CMDABC_LIBRARY=$library $shell_bin -f
+  set integration "$prototype_dir/shell/cmdabc.zsh"
+} else {
+  spawn env PS1=CMDABC_ESC_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
+  set integration "$prototype_dir/shell/cmdabc.bash"
+}
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
+
+must_expect "CMDABC_ESC_PROMPT"
+send -- "source $integration\r"
+must_expect "CMDABC_ESC_PROMPT"
+
+# Measure from the standalone Esc byte to alternate-screen exit. No delay is
+# inserted before or during the measurement.
+send -- "/test."
+must_expect "CmdABC  /test."
+set started [clock milliseconds]
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+set latency [expr {[clock milliseconds] - $started}]
+if {$latency > 250} {
+  puts stderr "FAIL: standalone Esc cancel took ${latency}ms (limit 250ms)"
+  exit 1
+}
+send -- "\025"
+
+# Individual arrows remain complete escape sequences and never cancel.
+send -- "/test."
+must_expect "CmdABC  /test."
+send -- "\033\[B"
+must_expect "> group"
+send -- "\033\[C"
+must_expect "> two"
+send -- "\033\[D"
+must_expect "> group"
+send -- "\033\[A"
+must_expect "> one"
+
+# A burst of complete arrows stays in the picker and ends on group.
+send -- "\033\[B\033\[A\033\[B"
+must_expect "> group"
+send -- "\033"
+must_expect "\033\[?25h\033\[?1049l"
+send -- "\025"
+
+send -- "exit\r"
+expect {
+  eof {}
+  timeout {
+    puts stderr "FAIL: shell did not exit"
+    exit 1
+  }
+}
+puts "PASS: $shell_kind Esc latency ${latency}ms and arrow-sequence integrity"

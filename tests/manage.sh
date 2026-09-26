@@ -24,198 +24,189 @@ assert_contains() {
     || fail "$3 (missing <$2> in <$1>)"
 }
 
-file_sha256() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{ print $1 }'
-  else
-    sha256sum "$1" | awk '{ print $1 }'
-  fi
-}
-
-assert_unchanged_after_failure() {
-  local before=$1
+assert_failure_surface() {
+  local expected=$1
+  local stdout_file=$TMP_DIR/error-stdout
+  local stderr_file=$TMP_DIR/error-stderr
+  local output
   shift
-  cp "$LIBRARY" "$before"
-  if "$@" >/dev/null 2>&1; then
+
+  if "$@" > "$stdout_file" 2> "$stderr_file"; then
     fail "command unexpectedly succeeded: $*"
   fi
-  cmp "$before" "$LIBRARY" || fail "failed command changed the library: $*"
+  [ ! -s "$stdout_file" ] || fail "failed command wrote to stdout: $*"
+  output=$(cat "$stderr_file")
+  assert_eq "$output" "$expected" "error surface for $*"
+}
+
+assert_removed_management_entry() {
+  local library=$1
+  local input=$2
+  local before=$TMP_DIR/removed-entry-before
+
+  cp "$library" "$before"
+  assert_failure_surface '[invalid: malformed entry]' \
+    "$CMDABC" manage --library "$library" --input "$input"
+  cmp "$before" "$library" \
+    || fail "removed management syntax changed the library: $input"
 }
 
 EMPTY_LIBRARY=$HOME/.cmdabc-data/command-library.txt
 : > "$EMPTY_LIBRARY"
 
-# The system namespace is built in and exists with an empty user library.
+expected_version=$(sed -n '1p' "$REPO_DIR/VERSION")
+assert_eq "$($CMDABC --version)" "$expected_version" 'runtime version'
+help_output=$($CMDABC --help)
+assert_contains "$help_output" "CmdABC $expected_version" \
+  'standard CLI help derives its version from VERSION'
+assert_contains "$help_output" '/abc.' 'public help identifies the management entry'
+if printf '%s\n' "$help_output" \
+  | grep -E 'cmdabc (add|manage|pick|children|internal-list)|/abc\.(add|del|update|help|list)' \
+    >/dev/null; then
+  fail 'public help exposes an internal helper or removed management syntax'
+fi
+
+# Standalone Add is no longer a public dispatch. It must fail before opening a
+# TTY editor and must not change the command library.
+cp "$EMPTY_LIBRARY" "$TMP_DIR/public-add-before"
+if "$CMDABC" add --library "$EMPTY_LIBRARY" \
+  > "$TMP_DIR/public-add-stdout" 2> "$TMP_DIR/public-add-stderr"; then
+  fail 'standalone cmdabc add unexpectedly succeeded'
+fi
+[ ! -s "$TMP_DIR/public-add-stdout" ] \
+  || fail 'standalone cmdabc add wrote to stdout'
+assert_contains "$(cat "$TMP_DIR/public-add-stderr")" \
+  '[error: unknown command: add]' 'standalone cmdabc add rejection'
+if grep -F 'cmdabc add' "$TMP_DIR/public-add-stderr" >/dev/null; then
+  fail 'standalone cmdabc add rejection advertised the removed route'
+fi
+cmp "$TMP_DIR/public-add-before" "$EMPTY_LIBRARY" \
+  || fail 'standalone cmdabc add changed the library'
+
+# The guided management home is built in, ordered, and limited to three
+# plain-language actions. No legacy command syntax appears in its rows.
 system_children=$($CMDABC children --path abc)
-expected_children=$(printf 'add\tleaf\t/abc.add.\ndel\tleaf\t/abc.del.\nhelp\tleaf\t/abc.help\nlist\tleaf\t/abc.list\nupdate\tleaf\t/abc.update.')
-assert_eq "$system_children" "$expected_children" 'built-in abc picker nodes'
-assert_eq "$($CMDABC manage --input /abc.list)" \
-  '0 user commands' 'empty library list'
+expected_children=$(printf 'add\tleaf\tAdd a command\ndel\tleaf\tRemove a command\nlist\tleaf\tView commands and errors')
+assert_eq "$system_children" "$expected_children" 'guided management home'
+if printf '%s\n' "$system_children" | grep -E '(^|[[:space:]])(help|update)([[:space:]]|$)|/abc\.' >/dev/null; then
+  fail 'management home exposes help, update, or legacy syntax'
+fi
 
-help_output=$($CMDABC manage --library "$EMPTY_LIBRARY" --input /abc.help)
-assert_contains "$help_output" '/abc.list' 'help lists list command'
-assert_contains "$help_output" '/abc.add.<target> <command>' 'help lists add command'
-assert_contains "$help_output" '/abc.update.<target> <command>' 'help lists update command'
-assert_contains "$help_output" '/abc.del.<target>' 'help lists del command'
-assert_contains "$help_output" '/abc.help' 'help lists help command'
+assert_eq "$($CMDABC internal-list --library "$EMPTY_LIBRARY")" \
+  '0 commands, 0 invalid' 'empty library list'
 
-# Reserved records are rejected by validation and cannot replace system nodes.
+# Removed developer-style management entries fail explicitly, write nothing,
+# and leave the source file byte-for-byte unchanged.
+for removed_input in \
+  '/abc.add' \
+  '/abc.add.git.status git status' \
+  '/abc.del.git.status' \
+  '/abc.update.git.status git status --short' \
+  '/abc.help' \
+  '/abc.list'; do
+  assert_removed_management_entry "$EMPTY_LIBRARY" "$removed_input"
+done
+
+# Public CLI failures remain one-line stderr with non-zero status and no path
+# or parser implementation details.
+assert_failure_surface '[error: command library not found]' \
+  "$CMDABC" internal-list --library "$TMP_DIR/does-not-exist.txt"
+assert_failure_surface '[invalid: name not found]' \
+  "$CMDABC" children --library "$EMPTY_LIBRARY" --path missing
+assert_failure_surface '[invalid: invalid name]' \
+  "$CMDABC" pick --library "$EMPTY_LIBRARY" --namespace 'bad.target'
+
+PERMISSION_LIBRARY=$TMP_DIR/permission-library.txt
+printf 'permission.target echo SAFE\n' > "$PERMISSION_LIBRARY"
+chmod 000 "$PERMISSION_LIBRARY"
+assert_failure_surface '[error: command library is not readable]' \
+  "$CMDABC" internal-list --library "$PERMISSION_LIBRARY"
+chmod 600 "$PERMISSION_LIBRARY"
+
+# Strict validation maps record problems to the stable public taxonomy.
+MISSING_LIBRARY=$TMP_DIR/missing-command.txt
+printf 'demo.invalid\n' > "$MISSING_LIBRARY"
+assert_failure_surface '[invalid: missing command]' \
+  "$CMDABC" validate --library "$MISSING_LIBRARY"
+
+MALFORMED_LIBRARY=$TMP_DIR/malformed.txt
+printf '%s\n' '----------------' > "$MALFORMED_LIBRARY"
+assert_failure_surface '[invalid: malformed entry]' \
+  "$CMDABC" validate --library "$MALFORMED_LIBRARY"
+
 RESERVED_LIBRARY=$TMP_DIR/reserved.txt
-printf 'abc.list touch %s\nabc.foo echo FAKE\n' "$TMP_DIR/reserved-executed" > "$RESERVED_LIBRARY"
-cp "$RESERVED_LIBRARY" "$TMP_DIR/reserved-before"
-if reserved_error=$($CMDABC validate --library "$RESERVED_LIBRARY" 2>&1); then
-  fail 'reserved namespace validation unexpectedly succeeded'
+printf 'abc.list echo NO\n' > "$RESERVED_LIBRARY"
+assert_failure_surface '[invalid: reserved namespace]' \
+  "$CMDABC" validate --library "$RESERVED_LIBRARY"
+
+DUPLICATE_LIBRARY=$TMP_DIR/duplicate.txt
+printf 'dup.path echo ONE\ndup.path echo TWO\n' > "$DUPLICATE_LIBRARY"
+assert_failure_surface '[invalid: name taken]' \
+  "$CMDABC" validate --library "$DUPLICATE_LIBRARY"
+
+EMPTY_SEGMENT_LIBRARY=$TMP_DIR/empty-segment.txt
+printf 'bad..name echo NO\n' > "$EMPTY_SEGMENT_LIBRARY"
+assert_failure_surface '[invalid: empty name segment]' \
+  "$CMDABC" validate --library "$EMPTY_SEGMENT_LIBRARY"
+
+UNSUPPORTED_NAME_LIBRARY=$TMP_DIR/unsupported-name.txt
+printf 'bad!name echo NO\n' > "$UNSUPPORTED_NAME_LIBRARY"
+assert_failure_surface '[invalid: unsupported name character]' \
+  "$CMDABC" validate --library "$UNSUPPORTED_NAME_LIBRARY"
+
+# List is the parser diagnostic surface. Comments and blanks stay invisible;
+# duplicate targets invalidate every occurrence; unrelated malformed rows do
+# not hide valid commands.
+TOLERANT_LIBRARY=$TMP_DIR/tolerant.txt
+printf '# heading\n\ngood.one echo ONE\ndemo.invalid\n   # disabled.path echo OFF\n# dup.path echo COMMENTED\ndup.path echo A\ndup.path echo B\n\nkeep.two echo TWO\n----------------\n' \
+  > "$TOLERANT_LIBRARY"
+cp "$TOLERANT_LIBRARY" "$TMP_DIR/tolerant-before"
+list_output=$($CMDABC internal-list --library "$TOLERANT_LIBRARY")
+list_expected=$(printf 'good.one echo ONE\ndemo.invalid  [invalid: missing command]\ndup.path  [invalid: name taken]\ndup.path  [invalid: name taken]\nkeep.two echo TWO\nline 11  [invalid: malformed entry]\n\n2 commands, 4 invalid')
+assert_eq "$list_output" "$list_expected" 'tolerant list diagnostics'
+cmp "$TMP_DIR/tolerant-before" "$TOLERANT_LIBRARY" \
+  || fail 'list changed the command library'
+if printf '%s\n' "$list_output" | grep -F 'disabled.path' >/dev/null; then
+  fail 'list included a comment'
 fi
-assert_contains "$reserved_error" 'reserved namespace: abc' 'reserved namespace validation message'
-assert_eq "$($CMDABC children --library "$RESERVED_LIBRARY" --path abc)" \
-  "$expected_children" 'reserved user records cannot replace system nodes'
-[ ! -e "$TMP_DIR/reserved-executed" ] || fail 'reserved payload was executed'
-cmp "$TMP_DIR/reserved-before" "$RESERVED_LIBRARY" || fail 'reserved validation changed user data'
-
-LIBRARY=$HOME/.cmdabc-data/command-library.txt
-printf '# user comment\n\nbase.one echo ONE\nbase.two echo TWO\n' > "$LIBRARY"
-
-# Add stores payload bytes, rejects duplicates/reserved targets, and never executes.
-assert_eq "$($CMDABC manage --library "$LIBRARY" --input '/abc.add.git.status git status')" \
-  'Added: git.status' 'add success output'
-grep -Fx 'git.status git status' "$LIBRARY" >/dev/null || fail 'add did not write target record'
-
-assert_unchanged_after_failure "$TMP_DIR/add-duplicate-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.git.status git status --short'
-assert_unchanged_after_failure "$TMP_DIR/add-reserved-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.abc.foo echo forbidden'
-assert_unchanged_after_failure "$TMP_DIR/add-empty-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.empty.target    '
-
-NOEXEC_MARKER=$TMP_DIR/add-must-not-execute
-assert_eq "$($CMDABC manage --library "$LIBRARY" \
-  --input "/abc.add.safe.noexec touch $NOEXEC_MARKER")" \
-  'Added: safe.noexec' 'no-exec add output'
-[ ! -e "$NOEXEC_MARKER" ] || fail 'add executed its payload'
-grep -Fx "safe.noexec touch $NOEXEC_MARKER" "$LIBRARY" >/dev/null \
-  || fail 'add did not preserve no-exec payload'
-
-assert_eq "$($CMDABC manage --library "$LIBRARY" \
-  --input '/abc.add.space.payload printf "%s %s" hello world')" \
-  'Added: space.payload' 'space payload add output'
-grep -Fx 'space.payload printf "%s %s" hello world' "$LIBRARY" >/dev/null \
-  || fail 'add did not preserve a payload containing spaces'
-
-# Shell metacharacters are opaque payload text: add stores them byte-for-byte,
-# list and picker input preserve them, and none of the text is executed.
-FIDELITY_ADD_PAYLOAD=$'printf \'%s\\n\' "$HOME" "$USER" | sed \'s/ /_/g\' && echo "add"; touch "$HOME/fidelity-add-executed" > "$HOME/fidelity add.out" 2>>"$HOME/fidelity-add.err"; printf \'%s\' path\\ with\\ spaces'
-assert_eq "$($CMDABC manage --library "$LIBRARY" \
-  --input "/abc.add.fidelity.payload $FIDELITY_ADD_PAYLOAD")" \
-  'Added: fidelity.payload' 'fidelity payload add output'
-[ ! -e "$HOME/fidelity-add-executed" ] || fail 'add executed the fidelity payload'
-[ ! -e "$HOME/fidelity add.out" ] || fail 'add applied fidelity output redirection'
-[ ! -e "$HOME/fidelity-add.err" ] || fail 'add applied fidelity error redirection'
-grep -Fx "fidelity.payload $FIDELITY_ADD_PAYLOAD" "$LIBRARY" >/dev/null \
-  || fail 'add did not preserve the fidelity payload'
-
-list_output=$($CMDABC manage --library "$LIBRARY" --input /abc.list)
-assert_contains "$list_output" '6 user commands' 'list count'
-assert_contains "$list_output" 'base.one echo ONE' 'list base record'
-assert_contains "$list_output" 'git.status git status' 'list added record'
-assert_contains "$list_output" "fidelity.payload $FIDELITY_ADD_PAYLOAD" \
-  'list changed the fidelity payload'
-if printf '%s\n' "$list_output" | grep -F 'abc.' >/dev/null; then
-  fail 'list included an internal abc command'
+if $CMDABC children --library "$TOLERANT_LIBRARY" --path dup >/dev/null 2>&1; then
+  fail 'duplicate target entered the tree'
 fi
-assert_eq "$($CMDABC children --library "$LIBRARY" --path fidelity)" \
-  "$(printf 'payload\tleaf\t%s' "$FIDELITY_ADD_PAYLOAD")" \
-  'picker input changed the added fidelity payload'
 
-# Update changes exactly one record and preserves comments/other records.
-assert_eq "$($CMDABC manage --library "$LIBRARY" \
-  --input '/abc.update.git.status git status --short')" \
-  'Updated: git.status' 'update success output'
-grep -Fx 'git.status git status --short' "$LIBRARY" >/dev/null \
-  || fail 'update did not replace target command'
-grep -Fx '# user comment' "$LIBRARY" >/dev/null || fail 'update removed comments'
-grep -Fx 'base.one echo ONE' "$LIBRARY" >/dev/null || fail 'update changed another record'
-
-FIDELITY_UPDATE_PAYLOAD=$'cat < "$HOME/input file" | tr \' \' \'_\' && printf "%s" "$SHELL"; touch "$HOME/fidelity-update-executed" 2> "$HOME/fidelity-update.err"; printf \'%s\' updated\\ value'
-assert_eq "$($CMDABC manage --library "$LIBRARY" \
-  --input "/abc.update.fidelity.payload $FIDELITY_UPDATE_PAYLOAD")" \
-  'Updated: fidelity.payload' 'fidelity payload update output'
-[ ! -e "$HOME/fidelity-update-executed" ] || fail 'update executed the fidelity payload'
-[ ! -e "$HOME/fidelity-update.err" ] || fail 'update applied fidelity redirection'
-grep -Fx "fidelity.payload $FIDELITY_UPDATE_PAYLOAD" "$LIBRARY" >/dev/null \
-  || fail 'update did not preserve the fidelity payload'
-if grep -Fx "fidelity.payload $FIDELITY_ADD_PAYLOAD" "$LIBRARY" >/dev/null; then
-  fail 'update left the old fidelity payload in the library'
+# The three frozen leading-comment forms are ignored. Inline # remains exact
+# command payload, and removing # restores the record immediately.
+COMMENT_LIBRARY=$TMP_DIR/comments.txt
+printf '#screen.test echo test\n# screen.test echo test\n    #screen.test echo test\nfoo.live echo hi # payload\nbroken\n' \
+  > "$COMMENT_LIBRARY"
+comment_list=$($CMDABC internal-list --library "$COMMENT_LIBRARY")
+comment_expected=$(printf 'foo.live echo hi # payload\nline 5  [invalid: malformed entry]\n\n1 commands, 1 invalid')
+assert_eq "$comment_list" "$comment_expected" \
+  'leading comments and inline payload classification'
+assert_eq "$($CMDABC children --library "$COMMENT_LIBRARY" --path foo)" \
+  "$(printf 'live\tleaf\techo hi # payload')" \
+  'inline # payload fidelity'
+if $CMDABC children --library "$COMMENT_LIBRARY" --path screen >/dev/null 2>&1; then
+  fail 'commented command entered the tree'
 fi
-list_output=$($CMDABC manage --library "$LIBRARY" --input /abc.list)
-assert_contains "$list_output" "fidelity.payload $FIDELITY_UPDATE_PAYLOAD" \
-  'list changed the updated fidelity payload'
-assert_eq "$($CMDABC children --library "$LIBRARY" --path fidelity)" \
-  "$(printf 'payload\tleaf\t%s' "$FIDELITY_UPDATE_PAYLOAD")" \
-  'picker input changed the updated fidelity payload'
-assert_unchanged_after_failure "$TMP_DIR/update-missing-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.update.missing.target echo NO'
-assert_unchanged_after_failure "$TMP_DIR/update-reserved-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.update.abc.help echo NO'
 
-# Delete removes exactly one record and rejects missing/reserved targets safely.
-assert_eq "$($CMDABC manage --library "$LIBRARY" --input /abc.del.git.status)" \
-  'Deleted: git.status' 'delete success output'
-if grep -F 'git.status ' "$LIBRARY" >/dev/null; then
-  fail 'delete left the target record behind'
-fi
-grep -Fx 'base.two echo TWO' "$LIBRARY" >/dev/null || fail 'delete changed another record'
-assert_unchanged_after_failure "$TMP_DIR/delete-missing-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input /abc.del.missing.target
-assert_unchanged_after_failure "$TMP_DIR/delete-reserved-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input /abc.del.abc.help
+printf 'screen.test echo test\n# screen.test echo test\n    #screen.test echo test\nfoo.live echo hi # payload\nbroken\n' \
+  > "$COMMENT_LIBRARY"
+uncommented_list=$($CMDABC internal-list --library "$COMMENT_LIBRARY")
+uncommented_expected=$(printf 'screen.test echo test\nfoo.live echo hi # payload\nline 5  [invalid: malformed entry]\n\n2 commands, 1 invalid')
+assert_eq "$uncommented_list" "$uncommented_expected" \
+  'removing # restores command classification'
 
-# List is read-only and tolerant: a recognizable incomplete path is reported
-# without hiding valid records or changing the source file.
-SINGLE_INVALID_LIBRARY=$TMP_DIR/list-single-invalid.txt
-printf 'single.one echo ONE\nsingle.bad\nsingle.two echo TWO\n' > "$SINGLE_INVALID_LIBRARY"
-cp "$SINGLE_INVALID_LIBRARY" "$TMP_DIR/list-single-invalid-before"
-single_invalid_sha=$(file_sha256 "$SINGLE_INVALID_LIBRARY")
-single_invalid_output=$($CMDABC manage --library "$SINGLE_INVALID_LIBRARY" --input /abc.list)
-single_invalid_expected=$(printf '2 user commands, 1 invalid entry\nsingle.one echo ONE\nsingle.bad    ???  [invalid: missing command]\nsingle.two echo TWO')
-assert_eq "$single_invalid_output" "$single_invalid_expected" \
-  'list tolerates one invalid record between valid records'
-cmp "$TMP_DIR/list-single-invalid-before" "$SINGLE_INVALID_LIBRARY" \
-  || fail 'list changed the single-invalid library'
-assert_eq "$(file_sha256 "$SINGLE_INVALID_LIBRARY")" "$single_invalid_sha" \
-  'list changed the single-invalid library SHA-256'
+# Stored payload is opaque data: list/children return it exactly and no shell
+# metacharacter is evaluated by CmdABC.
+NOEXEC_MARKER=$TMP_DIR/must-not-exist
+FIDELITY_PAYLOAD="printf '%s' \"\$HOME\" | cat && touch $NOEXEC_MARKER"
+FIDELITY_LIBRARY=$TMP_DIR/fidelity.txt
+printf 'fidelity.payload %s\n' "$FIDELITY_PAYLOAD" > "$FIDELITY_LIBRARY"
+assert_contains "$($CMDABC internal-list --library "$FIDELITY_LIBRARY")" \
+  "fidelity.payload $FIDELITY_PAYLOAD" 'list payload fidelity'
+assert_eq "$($CMDABC children --library "$FIDELITY_LIBRARY" --path fidelity)" \
+  "$(printf 'payload\tleaf\t%s' "$FIDELITY_PAYLOAD")" \
+  'tree payload fidelity'
+[ ! -e "$NOEXEC_MARKER" ] || fail 'payload was executed'
 
-# Multiple invalid records at the start, middle, and end remain visible. A row
-# whose path cannot be trusted is identified only by its source line.
-MULTI_INVALID_LIBRARY=$TMP_DIR/list-multiple-invalid.txt
-printf 'multi.first\nmulti.one echo ONE\nmulti.one\nbad..path echo BAD\nmulti.two echo TWO\nmulti.middle\nmulti.three echo THREE\nmulti.last\n' \
-  > "$MULTI_INVALID_LIBRARY"
-cp "$MULTI_INVALID_LIBRARY" "$TMP_DIR/list-multiple-invalid-before"
-multi_invalid_sha=$(file_sha256 "$MULTI_INVALID_LIBRARY")
-multi_invalid_output=$($CMDABC manage --library "$MULTI_INVALID_LIBRARY" --input /abc.list)
-multi_invalid_expected=$(printf '3 user commands, 5 invalid entries\nmulti.first    ???  [invalid: missing command]\nmulti.one echo ONE\nmulti.one    ???  [invalid: missing command]\nline 4    [invalid: malformed entry]\nmulti.two echo TWO\nmulti.middle    ???  [invalid: missing command]\nmulti.three echo THREE\nmulti.last    ???  [invalid: missing command]')
-assert_eq "$multi_invalid_output" "$multi_invalid_expected" \
-  'list preserves valid and invalid source order'
-cmp "$TMP_DIR/list-multiple-invalid-before" "$MULTI_INVALID_LIBRARY" \
-  || fail 'list changed the multiple-invalid library'
-assert_eq "$(file_sha256 "$MULTI_INVALID_LIBRARY")" "$multi_invalid_sha" \
-  'list changed the multiple-invalid library SHA-256'
-
-# Write operations stay strict and fail closed when any malformed record exists.
-LIBRARY=$MULTI_INVALID_LIBRARY
-assert_unchanged_after_failure "$TMP_DIR/malformed-add-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.multi.new echo NEW'
-assert_unchanged_after_failure "$TMP_DIR/malformed-update-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.update.multi.one echo CHANGED'
-assert_unchanged_after_failure "$TMP_DIR/malformed-delete-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input /abc.del.multi.one
-assert_eq "$(file_sha256 "$MULTI_INVALID_LIBRARY")" "$multi_invalid_sha" \
-  'strict write failures changed the malformed library SHA-256'
-
-# Parse failures never replace the existing database.
-INVALID_LIBRARY=$TMP_DIR/invalid.txt
-printf 'bad..path echo BAD\nkeep.path echo KEEP\n' > "$INVALID_LIBRARY"
-LIBRARY=$INVALID_LIBRARY
-assert_unchanged_after_failure "$TMP_DIR/invalid-add-before" \
-  "$CMDABC" manage --library "$LIBRARY" --input '/abc.add.new.path echo NEW'
-
-printf 'PASS: Phase 3.1 management checks\n'
+printf 'PASS: C02 guided management and parser checks\n'

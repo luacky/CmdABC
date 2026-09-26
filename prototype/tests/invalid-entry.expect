@@ -51,6 +51,10 @@ if {$shell_kind eq "zsh"} {
   spawn env PS1=CMDABC_INVALID_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
   set integration "$prototype_dir/shell/cmdabc.bash"
 }
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
 
 must_expect "CMDABC_INVALID_PROMPT"
 send -- "source $integration\r"
@@ -70,9 +74,9 @@ send -- "\r"
 must_expect "\033\[?25h\033\[?1049l"
 send -- "\014"
 must_expect "CMDABC_INVALID_PROMPT${tar_command}"
-send -- "\003"
-after 200
-must_expect "CMDABC_INVALID_PROMPT"
+  send -- "\025"
+  send -- "\014"
+  must_expect "CMDABC_INVALID_PROMPT"
 
 # Expanding the parent shows the nested valid leaf with its preview and exact
 # fillback behavior.
@@ -84,9 +88,9 @@ send -- "\r"
 must_expect "\033\[?25h\033\[?1049l"
 send -- "\014"
 must_expect "CMDABC_INVALID_PROMPT${filtering_command}"
-send -- "\003"
-after 200
-must_expect "CMDABC_INVALID_PROMPT"
+  send -- "\025"
+  send -- "\014"
+  must_expect "CMDABC_INVALID_PROMPT"
 
 # Selecting the invalid leaf returns no command. The widget clears /dome.,
 # prints a concise error on a fresh line, and restores an immediately usable
@@ -101,9 +105,7 @@ send -- "/dome."
 must_expect "CmdABC  /dome."
 send -- "\033\[B\033\[B\033\[B\r"
 must_expect "\033\[?25h\033\[?1049l"
-must_expect "\r\nCmdABC: invalid command entry\r\n"
-must_expect "  line 6: dome.a\r\n"
-must_expect "  expected: <namespace.path> <command>\r\n"
+must_expect "\r\n\[invalid: missing command\]\r\n"
 must_expect "CMDABC_INVALID_PROMPT"
 
 send -- "echo AFTER_INVALID_OK\r"

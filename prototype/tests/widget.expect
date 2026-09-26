@@ -8,7 +8,14 @@ set library [lindex $argv 3]
 set noexec_marker [lindex $argv 4]
 set picker_fidelity_payload [lindex $argv 5]
 set preview_style "\033\[2;3m"
+set menu_style "\033\[2m"
 set style_reset "\033\[0m"
+source [file join [file dirname [info script]] terminal-screen.tcl]
+if {[info exists env(CMDABC_EXPECT_LOG)]} {
+  log_user 1
+} else {
+  log_user 0
+}
 
 proc must_expect {literal} {
   expect {
@@ -24,12 +31,38 @@ proc must_expect {literal} {
   }
 }
 
+proc must_transition_to_add {} {
+  expect {
+    -ex "\033\[?1049h" {
+      puts stderr "FAIL: Add opened a nested alternate screen"
+      exit 1
+    }
+    -ex "\033\[?1049l" {
+      puts stderr "FAIL: picker exited before entering Add state"
+      exit 1
+    }
+    -ex "Add a command" { return }
+    timeout {
+      puts stderr "FAIL: timed out waiting for in-place Add state"
+      exit 1
+    }
+    eof {
+      puts stderr "FAIL: shell exited before entering Add state"
+      exit 1
+    }
+  }
+}
+
 if {$shell_kind eq "zsh"} {
   spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$library $shell_bin -f
   set integration "$prototype_dir/shell/cmdabc.zsh"
 } else {
   spawn env PS1=CMDABC_TEST_PROMPT CMDABC_LIBRARY=$library $shell_bin --noprofile --norc
   set integration "$prototype_dir/shell/cmdabc.bash"
+}
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
 }
 
 must_expect "CMDABC_TEST_PROMPT"
@@ -44,52 +77,172 @@ must_expect "CMDABC_TEST_PROMPT"
 # /abc. is always supplied by the runtime, not the user library.
 send -- "/abc."
 must_expect "CmdABC  /abc."
-must_expect "> add"
-must_expect "del"
-must_expect "help"
-must_expect "list"
-must_expect "update"
+must_expect "> add   ${menu_style}Add a command${style_reset}"
+must_expect "  del   ${menu_style}Remove a command${style_reset}"
+must_expect "  list  ${menu_style}View commands and errors${style_reset}"
+expect {
+  -ex "help" {
+    puts stderr "FAIL: management home still exposes help"
+    exit 1
+  }
+  -ex "update" {
+    puts stderr "FAIL: management home still exposes update"
+    exit 1
+  }
+  -ex "Esc cancel" {}
+}
 send -- "\033"
 after 150
 must_expect "\033\[?25h\033\[?1049l"
 send -- "\025"
 
-# Select list from the built-in picker, then press Enter again to invoke the
-# narrow management handler. The picker itself still only fills the line.
+# List opens in place and Esc returns to the same management tree.
 send -- "/abc."
 must_expect "CmdABC  /abc."
-send -- "\033\[B\033\[B\033\[B\r"
+send -- "\033\[B\033\[B\r"
+must_expect "Commands"
+must_expect "4 valid   0 invalid"
+must_expect "scroll   Esc back"
+send -- "\033"
+must_expect "CmdABC  /abc."
+must_expect "> list"
+send -- "\033"
 must_expect "\033\[?25h\033\[?1049l"
-after 150
+send -- "\025"
+
+# Selecting add switches state in the same picker and alternate-screen
+# session. No nested screen or picker exit is allowed during the transition.
+send -- "/abc."
+must_expect "CmdABC  /abc."
 send -- "\r"
-must_expect "4 user commands"
+must_transition_to_add
+must_expect "Type a name like a.b, then press Space"
+must_expect "Space next   Esc back"
+must_expect "\033\[4;2H\033\[?25h"
+send -- "\033"
+after 150
+must_expect "CmdABC  /abc."
+must_expect "> add"
+
+# Re-enter Add in place. A multiline bracketed paste is rejected without
+# changing the buffer. A failed submit preserves the buffer for Backspace
+# repair. A valid single-line bracketed paste inserts payload only.
+send -- "\r"
+must_transition_to_add
+must_expect "\033\[4;2H\033\[?25h"
+send -- "\033\[200~bad.one echo ONE\nbad.two echo TWO\033\[201~"
+must_expect "\[invalid: multiline input\]"
+must_expect "/\r\n\r\nSpace next   Esc back"
+must_expect "\033\[4;2H\033\[?25h"
+
+# Name-stage Enter cannot submit, and duplicate validation happens at Space
+# without leaving the editor.
+send -- "\r"
+must_expect "\[invalid: press Space to continue\]"
+must_expect "/\r\n\r\nSpace next   Esc back"
+send -- "test.one "
+must_expect "\[invalid: name taken\]"
+must_expect "/test.one\r\n\r\nSpace next   Esc back"
+send -- "\025"
+
+send -- "test "
+must_expect "\[invalid: name needs a dot\]"
+must_expect "/test"
+must_expect "\033\[4;6H\033\[?25h"
+after 100
+send -- ".1 "
+must_expect "Type the command, then press Enter"
+must_expect "/test.1 \r\n\r\nEnter add   Esc back"
+must_expect "\033\[4;9H\033\[?25h"
+send -- "\r"
+must_expect "\[invalid: missing command\]"
+must_expect "/test.1 \r\n\r\nEnter add   Esc back"
+
+# Backspace on the empty command removes the confirmation Space and returns
+# to editable name state. Space validates the same name again.
+send -- "\177"
+must_expect "Type a name like a.b, then press Space"
+must_expect "/test.1\r\n\r\nSpace next   Esc back"
+must_expect "\033\[4;8H\033\[?25h"
+send -- " "
+must_expect "Type the command, then press Enter"
+must_expect "/test.1 \r\n\r\nEnter add   Esc back"
+send -- "\177"
+must_expect "Type a name like a.b, then press Space"
+send -- "\025"
+must_expect "\033\[4;2H\033\[?25h"
+
+set pasted_add "manage.enter touch ${noexec_marker}X"
+set pasted_col [expr {[string length $pasted_add] + 2}]
+send -- "\033\[200~${pasted_add}\033\[201~"
+must_expect "/$pasted_add"
+must_expect "\033\[4;${pasted_col}H\033\[?25h"
+after 100
+send -- "\177"
+must_expect "/manage.enter touch $noexec_marker"
+set repaired_col [expr {$pasted_col - 1}]
+must_expect "\033\[4;${repaired_col}H\033\[?25h"
+after 100
+send -- "\r"
+must_expect "\033\[?25h\033\[?1049l"
+cmdabc_assert_stable_success_screen \
+  "CMDABC_TEST_PROMPT/abc" \
+  "success, Added /manage.enter" \
+  "CMDABC_TEST_PROMPT"
+send -- "printf 'CMDABC_SUCCESS_STATUS:%s\\n' \$?\r"
+must_expect "CMDABC_SUCCESS_STATUS:0"
+must_expect "CMDABC_TEST_PROMPT"
+send -- "echo TREE_ADD_RETURN_OK\r"
+must_expect "TREE_ADD_RETURN_OK"
 must_expect "CMDABC_TEST_PROMPT"
 
-# Select add, append its target and command, and verify the stored payload is
-# never handed to the ordinary shell executor.
 send -- "/abc."
 must_expect "CmdABC  /abc."
-send -- "\r"
+send -- "\033\[B\033\[B\r"
+must_expect "Commands"
+must_expect "manage.enter"
+must_expect "touch "
+must_expect "5 valid   0 invalid"
+send -- "\033"
+must_expect "CmdABC  /abc."
+send -- "\033"
 must_expect "\033\[?25h\033\[?1049l"
-after 150
-send -- "manage.enter touch $noexec_marker\r"
-must_expect "Added: manage.enter"
-must_expect "CMDABC_TEST_PROMPT"
+send -- "\025"
 
-send -- "/abc."
-must_expect "CmdABC  /abc."
-send -- "\033\[B\033\[B\033\[B\r"
-must_expect "\033\[?25h\033\[?1049l"
-after 150
-send -- "\r"
-must_expect "5 user commands"
-must_expect "manage.enter touch $noexec_marker"
-must_expect "CMDABC_TEST_PROMPT"
+# Removed 0.2.0 management syntax is rejected as a real shell command. The
+# final screen contains one error and one prompt, and the accepted line keeps
+# the runtime's status 2.
+set legacy_index 0
+foreach legacy_input [list "/abc.list" "/abc.help" "/abc.add.legacy.target echo NO"] {
+  incr legacy_index
+  send -- "\033\[200~${legacy_input}\033\[201~"
+  # ZLE/Readline may repaint the prompt and pasted buffer in separate chunks;
+  # synchronise on the complete buffer before accepting it.
+  must_expect "${legacy_input}"
+  send -- "\r"
+  cmdabc_assert_stable_screen \
+    "CMDABC_TEST_PROMPT${legacy_input}" \
+    [list \
+      "CMDABC_TEST_PROMPT${legacy_input}" \
+      "\[invalid: malformed entry\]" \
+      "CMDABC_TEST_PROMPT"]
+  send -- "printf 'CMDABC_LEGACY_STATUS_${legacy_index}:%s\\n' \$?\r"
+  must_expect "CMDABC_LEGACY_STATUS_${legacy_index}:2"
+  must_expect "CMDABC_TEST_PROMPT"
+}
 
 # Ordinary dots must remain ordinary input and must not launch the picker.
 send -- "echo ordinary.txt"
 must_expect "echo ordinary.txt"
 send -- "\025"
+
+# Unix paths and unknown namespaces remain ordinary editable shell input.
+foreach ordinary_input {/bin/ls /usr/bin/env /tmp/foo ./foo ../foo /unknown.} {
+  send -- $ordinary_input
+  send -- "\014"
+  must_expect "CMDABC_TEST_PROMPT$ordinary_input"
+  send -- "\025"
+}
 
 # A picker leaf containing ordinary shell metacharacters is returned to the
 # editable buffer exactly as stored and is not executed.

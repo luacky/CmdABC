@@ -22,6 +22,10 @@ proc must_expect {literal} {
 }
 
 spawn env PS1=CMDABC_TREE_PROMPT CMDABC_LIBRARY=$library $bash_bin --noprofile --norc
+expect_before -ex "\033\[6n" {
+  send -- "\033\[1;1R"
+  exp_continue
+}
 must_expect "CMDABC_TREE_PROMPT"
 send -- "source $prototype_dir/shell/cmdabc.bash\r"
 must_expect "CMDABC_TREE_PROMPT"
