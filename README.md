@@ -1,34 +1,10 @@
 # CmdABC
 
-**Commands as easy as ABC.**
+CmdABC is a lightweight command library and picker for Bash and zsh. Install it. Remember `/abc.`.
 
 English | [简体中文](README.zh-CN.md)
 
-CmdABC is a lightweight hierarchical command picker and manager for Bash and zsh.
-
-Type a namespace and manually enter the final `.` to open its command tree. Select a leaf to fill the current shell command line — CmdABC never executes it automatically.
-
-## Screenshots
-
-### Command picker
-
-![CmdABC command picker](docs/images/cmdabc-01-command-tree.png)
-
-### Built-in management
-
-![CmdABC management](docs/images/cmdabc-02-management.png)
-
-### Fill, don't execute
-
-![CmdABC command fill](docs/images/cmdabc-03-command-fill.png)
-
-### Invalid entries stay isolated
-
-![CmdABC invalid entry](docs/images/cmdabc-04-invalid-entry.png)
-
-Leaf entries show a dim command preview. Invalid records do not block valid commands; recognizable invalid leaves appear as `???` and report the problem only when selected.
-
-## Installation
+## Quick start
 
 Extract the release package and run:
 
@@ -36,147 +12,93 @@ Extract the release package and run:
 ./install.sh
 ```
 
-No administrator privileges are required.
-
-Open a new shell after installation. Existing shell sessions keep previously loaded CmdABC functions; the installer also prints how to activate the new installation in the current shell.
-
-Program files:
+Open a new shell, then type the final `.` yourself:
 
 ```text
-~/.cmdabc/
+/abc.
 ```
 
-User command library:
+![CmdABC management menu with add, del, and list](docs/images/cmdabc-02-management.png)
 
-```text
-~/.cmdabc-data/command-library.txt
-```
+Choose `add`, `del`, or `list`. The screen guides you from there.
 
-Installation and reinstallation leave an existing command library untouched.
+## Manage commands
 
-## Command picker
+`/abc.` opens the management menu:
 
-Type the namespace, then manually enter the final dot:
+- `add` — Add a command
+- `del` — Remove a command
+- `list` — View commands and errors
 
-```text
-/namespace.
-```
+The Add screen asks for a name, then a command:
 
-> Pasting the whole `/namespace.` string does not trigger the picker. The final `.` must be typed.
+![CmdABC Add command step](docs/images/cmdabc-05-add.png)
 
-Controls:
+List shows saved commands and errors together:
+
+![CmdABC List view with valid and invalid records](docs/images/cmdabc-04-list.png)
+
+## Use a saved command
+
+If you saved the name `git.status`, type `/git.` to open its command tree. The final `.` must be typed; pasting the whole trigger does not open the picker.
+
+![CmdABC command tree](docs/images/cmdabc-01-command-tree.png)
 
 - `↑` / `↓` — move through visible items
-- `→` / `Enter` — expand a parent or select a leaf
-- `←` — return to the parent and collapse
+- `→` / `Enter` — open a branch or select a command
+- `←` — return and collapse a branch
 - `Esc` — cancel
 
-## Managing commands
+Selecting a command fills the shell command line. CmdABC never runs it automatically.
 
-CmdABC reserves the `/abc.*` namespace for built-in management:
+![Saved command filled into the shell line](docs/images/cmdabc-03-command-fill.png)
 
-```text
-/abc.add.<target> <command>
-/abc.del.<target>
-/abc.help
-/abc.list
-/abc.update.<target> <command>
-```
+## User data
 
-### Adding a command
+Your commands live in `~/.cmdabc-data/command-library.txt`. You do not need to edit this file for normal use: use `/abc.` instead. Advanced or bulk edits can be made directly in the file.
 
-Use `/abc.add.<target> <command>` to add a command to your library.
+Installation, reinstallation, and uninstallation preserve the command library.
 
-For example:
+### Manual file format
 
-```text
-/abc.add.git.status git status
-```
-
-This creates the target `git.status` with the command:
-
-```text
-git status
-```
-
-After adding it, type:
-
-```text
-/git.
-```
-
-and select `status` from the picker.
-
-CmdABC fills `git status` into the current command line but does not execute it automatically.
-
-Dots in the target create namespace levels. For example:
-
-```text
-/abc.add.docker.container.list docker ps -a
-```
-
-creates:
-
-```text
-docker
-└── container
-    └── list
-```
-
-### Command library
-
-User commands are stored in:
-
-```text
-~/.cmdabc-data/command-library.txt
-```
-
-Each command occupies one line:
-
-```text
-<target> <command>
-```
-
-For example:
+Each saved command uses `name command` on one line:
 
 ```text
 git.status git status
-docker.container.list docker ps -a
-system.disk df -h
+docker.ps docker ps
 ```
 
-The target defines where the command appears in the CmdABC namespace tree, and the remaining content is the command associated with that target.
+The name starts after `/` in the picker and ends before the first space. It must contain at least one `.`, as in `a.b`. Do not write the leading `/` in the file. The command is the full shell content after the first space.
 
-Using `/abc.add` is recommended instead of editing the library manually.
+A line whose first non-whitespace character is `#` is a comment:
 
-`/abc.list` can still show valid commands when individual library entries are malformed. Write operations remain strict to avoid rewriting damaged user data.
+```text
+# git.status git status
+```
 
-## Uninstallation
+An inline `#` stays part of the command:
 
-Run:
+```text
+demo.echo echo hello # test
+```
+
+## Safety and compatibility
+
+CmdABC fills selected commands without executing them. A malformed record does not hide other valid commands; duplicate names are invalid. CmdABC uses no `eval` or `stty`.
+
+Tested environments: macOS with zsh 5.9 or GNU Bash 5.2; Ubuntu and ImmortalWrt with Bash 5.2.
+
+## Install and uninstall
+
+`./install.sh` needs no administrator privileges. It installs program files under `~/.cmdabc/` and prints how to reload an already open shell. A new shell loads the installation automatically.
+
+To uninstall:
 
 ```sh
 ~/.cmdabc/uninstall.sh
 ```
 
-CmdABC removes its program files and managed shell configuration while preserving:
-
-```text
-~/.cmdabc-data/
-```
-
-A later reinstall will continue using the same command library.
-
-## Tested environments
-
-- macOS — zsh 5.9
-- macOS — GNU Bash 5.2
-- Ubuntu — Bash 5.2
-- ImmortalWrt — Bash 5.2
-
-### macOS Bash note
-
-The installer manages `~/.bashrc` only. It does not modify `~/.bash_profile` or `~/.profile`. If Bash starts as a login shell, your existing configuration must load `~/.bashrc`.
+The installer manages `~/.bashrc` for Bash; it does not modify `~/.bash_profile` or `~/.profile`. If Bash starts as a login shell, your existing configuration must load `~/.bashrc`.
 
 ## License
 

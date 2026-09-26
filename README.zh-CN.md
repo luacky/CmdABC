@@ -1,183 +1,105 @@
 # CmdABC
 
-**敲命令，简单如 ABC。**
+CmdABC 是面向 Bash 和 zsh 的轻量命令库与命令选择工具。装好后，只需记住 `/abc.`。
 
 [English](README.md) | 简体中文
 
-CmdABC 是面向 Bash 和 zsh 的轻量级层级命令选择与管理工具。
+## 快速开始
 
-输入 namespace，并手动敲下最后一个 `.` 即可打开命令树。选择叶子后，CmdABC 只把命令回填到当前 Shell 编辑行，不会自动执行。
-
-## 截图
-
-### 命令选择
-
-![CmdABC 命令选择](docs/images/cmdabc-01-command-tree.png)
-
-### 内置管理
-
-![CmdABC 内置管理](docs/images/cmdabc-02-management.png)
-
-### 只回填，不执行
-
-![CmdABC 命令回填](docs/images/cmdabc-03-command-fill.png)
-
-### 单条错误不影响其他命令
-
-![CmdABC 容错提示](docs/images/cmdabc-04-invalid-entry.png)
-
-叶子节点会显示灰色命令预览。单条格式错误不会拖累整个命令库；能够识别的异常叶子显示为 `???`，只有选中时才提示具体错误。
-
-## 安装
-
-解压发布包后运行：
+解压发布包并运行：
 
 ```sh
 ./install.sh
 ```
 
-无需管理员权限。
-
-安装后新开一个 Shell 即可使用。已经打开的 Shell 会保留旧的 CmdABC 函数；安装器也会提示如何在当前 Shell 中重新载入。
-
-程序文件：
+打开新的 Shell，然后亲手输入最后一个 `.`：
 
 ```text
-~/.cmdabc/
+/abc.
 ```
 
-用户命令库：
+![CmdABC 管理菜单：add、del、list](docs/images/cmdabc-02-management.png)
 
-```text
-~/.cmdabc-data/command-library.txt
-```
-
-安装和重新安装都不会覆盖已经存在的命令库。
-
-## 命令选择
-
-输入 namespace，然后手动敲下最后一个点：
-
-```text
-/namespace.
-```
-
-> 整段粘贴 `/namespace.` 不会触发 picker，最后一个 `.` 必须手动输入。
-
-操作：
-
-- `↑` / `↓` — 移动选择
-- `→` / `Enter` — 展开父节点或选择叶子
-- `←` — 返回父节点并折叠
-- `Esc` — 取消
+选择 `add`、`del` 或 `list`，接下来按照屏幕提示操作。
 
 ## 管理命令
 
-CmdABC 保留 `/abc.*` namespace 用于内置管理：
+`/abc.` 会打开管理菜单：
 
-```text
-/abc.add.<target> <command>
-/abc.del.<target>
-/abc.help
-/abc.list
-/abc.update.<target> <command>
-```
+- `add` — 添加命令
+- `del` — 删除命令
+- `list` — 查看命令和错误
 
-### 添加命令
+Add 界面会依次引导输入名称和命令：
 
-使用 `/abc.add.<target> <command>` 将自己的命令添加到命令库。
+![CmdABC Add 命令阶段](docs/images/cmdabc-05-add.png)
 
-例如：
+List 会一起显示已保存的命令和错误：
 
-```text
-/abc.add.git.status git status
-```
+![CmdABC List 页面：正常记录与错误记录](docs/images/cmdabc-04-list.png)
 
-这会创建 target `git.status`，对应的命令为：
+## 使用已保存的命令
 
-```text
-git status
-```
+假设保存了名称 `git.status`，输入 `/git.` 即可打开命令树。最后一个 `.` 必须亲手输入；整段粘贴不会触发选择界面。
 
-添加完成后，输入：
+![CmdABC 命令树](docs/images/cmdabc-01-command-tree.png)
 
-```text
-/git.
-```
+- `↑` / `↓` — 在可见项目间移动
+- `→` / `Enter` — 展开分支或选择命令
+- `←` — 返回并折叠分支
+- `Esc` — 取消
 
-即可在 picker 中选择 `status`。
+选择命令后，CmdABC 只会将它填入当前 Shell 命令行，不会自动执行。
 
-CmdABC 只会把 `git status` 回填到当前命令行，不会自动执行。
+![命令回填到 Shell 编辑行](docs/images/cmdabc-03-command-fill.png)
 
-target 中的点号用于划分 namespace 层级。例如：
+## 用户数据
 
-```text
-/abc.add.docker.container.list docker ps -a
-```
+命令保存在 `~/.cmdabc-data/command-library.txt`。日常使用不需要编辑这个文件，进入 `/abc.` 即可。高级用户也可以直接编辑文件，批量管理命令。
 
-会形成：
+安装、重新安装和卸载都会保留命令库。
 
-```text
-docker
-└── container
-    └── list
-```
+### 手工文件格式
 
-### 用户命令库
-
-用户命令保存在：
-
-```text
-~/.cmdabc-data/command-library.txt
-```
-
-每条命令占一行，基本格式为：
-
-```text
-<target> <command>
-```
-
-例如：
+每条命令占一行，格式为 `name command`：
 
 ```text
 git.status git status
-docker.container.list docker ps -a
-system.disk df -h
+docker.ps docker ps
 ```
 
-target 决定命令在 CmdABC namespace 树中的位置，其后的内容是这个 target 对应的实际命令。
+在选择界面中，名称从 `/` 后开始，到第一个空格前结束。名称必须至少包含一个 `.`，例如 `a.b`。写入文件时不要带开头的 `/`。第一个空格后的完整 Shell 内容是命令。
 
-推荐使用 `/abc.add` 添加命令，而不是直接手工修改命令库文件。
+首个非空白字符为 `#` 的整行是注释：
 
-即使命令库中存在个别格式错误，`/abc.list` 仍会列出其他正常记录；写操作继续保持严格校验，避免意外重写损坏的数据。
+```text
+# git.status git status
+```
 
-## 卸载
+命令中的行内 `#` 仍属于命令内容：
 
-运行：
+```text
+demo.echo echo hello # test
+```
+
+## 安全与兼容性
+
+CmdABC 只回填选中的命令，不会自动执行。单条格式错误不会隐藏其他正常命令；重复名称会被判为无效。CmdABC 不使用 `eval` 或 `stty`。
+
+已验证环境：macOS 上的 zsh 5.9 和 GNU Bash 5.2；Ubuntu、ImmortalWrt 上的 Bash 5.2。
+
+## 安装与卸载
+
+运行 `./install.sh` 无需管理员权限。程序文件安装在 `~/.cmdabc/`，安装器会提示如何让已打开的 Shell 重新载入；新开的 Shell 会自动载入。
+
+卸载命令：
 
 ```sh
 ~/.cmdabc/uninstall.sh
 ```
 
-CmdABC 会删除程序文件和它管理的 Shell 配置，同时保留：
+安装器只管理 Bash 的 `~/.bashrc`，不会修改 `~/.bash_profile` 或 `~/.profile`。如果 Bash 以 login shell 启动，需要由现有配置载入 `~/.bashrc`。
 
-```text
-~/.cmdabc-data/
-```
-
-以后重新安装会继续使用原来的命令库。
-
-## 已测试环境
-
-- macOS — zsh 5.9
-- macOS — GNU Bash 5.2
-- Ubuntu — Bash 5.2
-- ImmortalWrt — Bash 5.2
-
-### macOS Bash 说明
-
-安装器只维护 `~/.bashrc`，不会修改 `~/.bash_profile` 或 `~/.profile`。如果 Bash 以 login shell 启动，需要由现有配置负责加载 `~/.bashrc`。
-
-## License
+## 许可证
 
 [MIT](LICENSE)
